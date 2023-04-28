@@ -1,14 +1,21 @@
-pub fn add(left: usize, right: usize) -> usize {
-    left + right
-}
+#[macro_use]
+mod error;
+mod aggregator;
+mod config;
+mod consensus;
+mod core;
+mod filter;
+mod leader;
+mod mempool;
+mod messages;
 
 #[cfg(test)]
-mod tests {
-    use super::*;
+#[path = "tests/common.rs"]
+mod common;
 
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
-}
+pub use crate::config::{Committee, Parameters, Protocol};
+pub use crate::consensus::{ConsensusMessage, Consensus};
+pub use crate::core::SeqNumber;
+pub use crate::error::ConsensusError;
+pub use crate::mempool::{ConsensusMempoolMessage, PayloadStatus};
+pub use crate::messages::{};
