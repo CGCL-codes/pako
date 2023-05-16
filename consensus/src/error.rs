@@ -1,4 +1,4 @@
-use crate::core::{SeqNumber, HeightNumber};
+use crate::messages::{SeqNumber, ViewNumber};
 use crypto::{CryptoError, Digest, PublicKey};
 use store::StoreError;
 use thiserror::Error;
@@ -71,11 +71,11 @@ pub enum ConsensusError {
     #[error("Malformed block {0}")]
     MalformedBlock(Digest),
 
-    #[error("Received block {digest} from leader {leader} at round {round}")]
+    #[error("Received block {digest} from leader {leader} at view {view}")]
     WrongLeader {
         digest: Digest,
         leader: PublicKey,
-        round: SeqNumber,
+        view: ViewNumber,
     },
 
     #[error("Invalid block/vote/qc height {0}")]

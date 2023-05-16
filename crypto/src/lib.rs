@@ -214,11 +214,11 @@ impl Signature {
 #[derive(Clone)]
 pub struct SignatureService {
     channel: Sender<(Digest, oneshot::Sender<Signature>)>,
-    tss_channel: Option<Sender<(Digest, oneshot::Sender<SignatureShare>)>>,
+    tss_channel: Sender<(Digest, oneshot::Sender<SignatureShare>)>,
 }
 
 impl SignatureService {
-    pub fn new(secret: SecretKey, tss_secret: Option<SecretKeyShare>) -> Self {
+    pub fn new(secret: SecretKey, tss_secret: SecretKeyShare) -> Self {
         let (tx, mut rx): (Sender<(_, oneshot::Sender<_>)>, _) = channel(100);
         tokio::spawn(async move {
             while let Some((digest, sender)) = rx.recv().await {
@@ -227,16 +227,14 @@ impl SignatureService {
             }
         });
         let (tss_tx, mut tss_rx): (Sender<(_, oneshot::Sender<_>)>, _) = channel(100);
-        if let Some(secret_share) = tss_secret {
-            tokio::spawn(async move {
-                while let Some((digest, sender)) = tss_rx.recv().await {
-                    let signature_share = secret_share.sign(digest);
-                    let _ = sender.send(signature_share);
-                }
-            });
-            return Self { channel: tx, tss_channel: Some(tss_tx) };
-        }
-        Self { channel: tx, tss_channel: None }
+        tokio::spawn(async move {
+            while let Some((digest, sender)) = tss_rx.recv().await {
+                let signature_share = tss_secret.sign(digest);
+                let _ = sender.send(signature_share);
+            }
+        });
+        return Self { channel: tx, tss_channel: tss_tx };
+        
     }
 
     pub async fn request_signature(&mut self, digest: Digest) -> Signature {
@@ -251,16 +249,14 @@ impl SignatureService {
 
     pub async fn request_tss_signature(&mut self, digest: Digest) -> Option<SignatureShare> {
         let (sender, receiver): (oneshot::Sender<_>, oneshot::Receiver<_>) = oneshot::channel();
-        if let Some(channel) = &self.tss_channel {
-            if let Err(e) = channel.send((digest, sender)).await {
-                panic!("Failed to send message TSS Signature Service: {}", e);
-            }
-            return Some(receiver
-                .await
-                .expect("Failed to receive tss signature share from TSS Signature Service"));
+        if let Err(e) = self.tss_channel.send((digest, sender)).await {
+            panic!("Failed to send message TSS Signature Service: {}", e);
         }
-        return None;
+        return Some(receiver
+            .await
+            .expect("Failed to receive tss signature share from TSS Signature Service"));
     }
+
 }
 
 // Wrapper for threshold signature key shares
