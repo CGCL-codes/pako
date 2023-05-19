@@ -1,4 +1,4 @@
-use crate::messages::{SeqNumber, ViewNumber};
+use crate::messages::{SeqNumber, ViewNumber, Proof};
 use crypto::{CryptoError, Digest, PublicKey};
 use store::StoreError;
 use thiserror::Error;
@@ -34,6 +34,9 @@ pub enum ConsensusError {
 
     #[error("Node {0} is not in the committee")]
     NotInCommittee(PublicKey),
+
+    #[error("Invalid vote proof")]
+    InvalidVoteProof(Option<Proof>),
 
     #[error("Invalid signature")]
     InvalidSignature(#[from] CryptoError),
@@ -77,9 +80,6 @@ pub enum ConsensusError {
         leader: PublicKey,
         view: ViewNumber,
     },
-
-    #[error("Invalid block/vote/qc height {0}")]
-    InvalidHeight(HeightNumber),
 
     #[error("Invalid payload")]
     InvalidPayload,

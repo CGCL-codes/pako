@@ -6,28 +6,88 @@ use ed25519_dalek::Sha512;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashSet, BTreeMap};
 use std::convert::TryInto;
-use std::fmt;
-use threshold_crypto::Signature as ThreshldSig;
+use std::{fmt, hash};
 use threshold_crypto::{SignatureShare, PublicKeySet};
 
-pub type SeqNumber = u64;
+pub type SeqNumber = u128;
 pub type ViewNumber = u8;
 
-pub enum Phase {
-    Phase1,
-    Phase2
+// Two types of proof associated with block
+#[derive(Serialize, Deserialize, Clone)]
+pub enum Proof {
+    // Relates to Phase1 (see PBPhase defined below).
+    Pi(Vec<(bool, ViewNumber, threshold_crypto::Signature)>),
+
+    // Relates to Phase2.
+    Sigma(threshold_crypto::Signature),
 }
 
-pub struct Proof(bool, ViewNumber, ThreshldSig);
+// Two PB phase under SPB.
+#[derive(Serialize, Deserialize, Clone)]
+pub enum PBPhase {
+    Phase1,
+    Phase2,
+}
 
+#[derive(Serialize, Deserialize, Debug)]
+pub enum ConsensusMessage {
+    Val(Block),
+    Echo(Echo),
+    Lock(Lock),
+    Finish(Finish),
+    Done(Done),
+    Halt(Halt),
+    RandomnessShare(RandomnessShare),
+    RandomCoin(RandomCoin),
+    PreVote(PreVote),
+    Vote(Vote),
+}
+
+// pub enum ID {
+//     SMVBA(SeqNumber, ViewNumber),
+//     SPB(SeqNumber, ViewNumber, PublicKey),
+//     PB(SeqNumber, ViewNumber, PublicKey, PBPhase),
+// }
+
+// impl ID {
+//     pub fn digest_with_block(&self, block: Option<&Block>) -> Digest {
+//         let mut hasher = Sha512::new();
+//         match self {
+//             ID::SMVBA(s, v) => {
+//                 hasher.update(s.to_le_bytes());
+//                 hasher.update(v.to_le_bytes());
+//             }
+//             ID::SPB(s, v, pk) => {
+//                 hasher.update(s.to_le_bytes());
+//                 hasher.update(v.to_le_bytes());
+//                 hasher.update(pk.to_bytes());
+//             },
+//             ID::PB(s, v, pk, pp) => {
+//                 hasher.update(s.to_le_bytes());
+//                 hasher.update(v.to_le_bytes());
+//                 hasher.update(pk.0);
+//                 hasher.update(pp);
+//             }
+    
+//         };
+//         if let Some(block) = block {
+//             hasher.update(block.digest());
+//         }
+
+//         Digest(hasher.finalize().as_slice()[..32].try_into().unwrap())
+//     }
+// }
+
+#[derive(Serialize, Deserialize, Clone)]
 pub struct Block {
     pub payload: Vec<Digest>,
     pub author: PublicKey,
+    pub signature: Signature,
     pub epoch: SeqNumber,
     pub view: ViewNumber,
-    pub phase: Phase,
-    pub signature: Signature,
-    pub proof: Option<Proof>,
+
+    // According to proof, we can tell which PBPhase this block is currently in.
+    pub proof: Proof,
 }
 
 impl Block {
@@ -47,14 +107,26 @@ impl Block {
 }
 
 impl Hash for Block {
+    // Form a complete digest of the block,
+    // denote as <ID, R, l, 1 or 2> in original paper,
+    // where ID is the identifier of current MVBA instance, here we
+    // use epoch. R equals view number, l corresponds to the leader
+    // of the SPB instance, 1 or 2 indicates PB phase 1 or 2.
     fn digest(&self) -> Digest {
         let mut hasher = Sha512::new();
         hasher.update(self.author.0);
-        hasher.update(self.view.to_le_bytes());
         hasher.update(self.epoch.to_le_bytes());
+        hasher.update(self.view.to_le_bytes());
+
         for x in &self.payload {
             hasher.update(x);
         }
+
+        match self.proof {
+            Proof::Pi(_) => hasher.update(&[0]),
+            Proof::Sigma(_) => hasher.update(&[1]),
+        };
+
         Digest(hasher.finalize().as_slice()[..32].try_into().unwrap())
     }
 }
@@ -63,11 +135,11 @@ impl fmt::Debug for Block {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
         write!(
             f,
-            "{}: B(author {}, view {}, epoch {}, payload_len {}",
+            "{}: B(author {}, epoch {}, view {}, payload_len {}",
             self.digest(),
             self.author,
-            self.view,
             self.epoch,
+            self.view,
             self.payload.iter().map(|x| x.size()).sum::<usize>(),
         )
     }
@@ -75,8 +147,30 @@ impl fmt::Debug for Block {
 
 impl fmt::Display for Block {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
-        write!(f, "B{}", self.view)
+        write!(f, "B{}", self.author)
     }
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct Echo {
+    // Block info.
+    pub epoch: SeqNumber, 
+    pub view:ViewNumber, 
+    pub block_author: PublicKey, 
+    pub phase: PBPhase,
+
+    // Signature share signed by a valid node.
+    pub signature_share: SignatureShare,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct Lock {
+    // Block digest with PB phase.
+    pub digest: Digest,
+    pub phase: PBPhase,
+
+    // Threshold signature combined by PB leader.
+    pub signature: threshold_crypto::Signature,
 }
 
 #[derive(Clone, Serialize, Deserialize)]

@@ -214,7 +214,7 @@ impl Signature {
 #[derive(Clone)]
 pub struct SignatureService {
     channel: Sender<(Digest, oneshot::Sender<Signature>)>,
-    tss_channel: Sender<(Digest, oneshot::Sender<SignatureShare>)>,
+    tss_sign_channel: Sender<(Digest, oneshot::Sender<SignatureShare>)>,
 }
 
 impl SignatureService {
@@ -226,6 +226,7 @@ impl SignatureService {
                 let _ = sender.send(signature);
             }
         });
+
         let (tss_tx, mut tss_rx): (Sender<(_, oneshot::Sender<_>)>, _) = channel(100);
         tokio::spawn(async move {
             while let Some((digest, sender)) = tss_rx.recv().await {
@@ -233,7 +234,8 @@ impl SignatureService {
                 let _ = sender.send(signature_share);
             }
         });
-        return Self { channel: tx, tss_channel: tss_tx };
+
+        return Self { channel: tx, tss_sign_channel: tss_tx };
         
     }
 
@@ -249,7 +251,7 @@ impl SignatureService {
 
     pub async fn request_tss_signature(&mut self, digest: Digest) -> Option<SignatureShare> {
         let (sender, receiver): (oneshot::Sender<_>, oneshot::Receiver<_>) = oneshot::channel();
-        if let Err(e) = self.tss_channel.send((digest, sender)).await {
+        if let Err(e) = self.tss_sign_channel.send((digest, sender)).await {
             panic!("Failed to send message TSS Signature Service: {}", e);
         }
         return Some(receiver
