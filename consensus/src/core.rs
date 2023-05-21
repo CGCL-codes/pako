@@ -2,12 +2,12 @@ use crate::{SeqNumber, messages};
 use crate::config::{Committee, Parameters};
 use crate::error::{ConsensusError, ConsensusResult};
 use crate::leader::LeaderElector;
-use crate::messages::{Block, ViewNumber, ConsensusMessage, PBPhase, Proof, ID, ThresholdSig};
+use crate::messages::{Block, ViewNumber, ConsensusMessage, PBPhase, Proof, ID, ThresholdSig, Echo};
 use crypto::Hash as _;
 use crypto::{Digest, PublicKey, SignatureService};
 use log::debug;
 use serde::{Serialize, Deserialize};
-use threshold_crypto::{PublicKeySet, SecretKeyShare, PublicKeyShare};
+use threshold_crypto::{PublicKeySet, SecretKeyShare, PublicKeyShare, SignatureShare};
 use tokio::sync::mpsc::{Receiver, Sender};
 use store::Store;
 
@@ -39,12 +39,12 @@ impl Core {
 
     }
 
-    // TODO: implement value_validation (j = 1)
+    // TODO: implement check_value()
     fn check_value(&self, block: &Block) -> bool {
         todo!()
     }
 
-    // Implement value_validation (j = 2)
+    // Value validation 
     fn value_validation(&self, block: &Block) -> bool {
         match block.proof {
             Proof::Pi(_) => self.check_value(block),
@@ -74,14 +74,39 @@ impl Core {
         Ok(())
     }
 
-    async fn echo(&self, )
+    async fn echo(&self, author: PublicKey, signature_share: SignatureShare, phase: PBPhase) -> ConsensusResult<()> {
+        let echo = Echo {
+            block_author: author,
+            epoch: self.epoch,
+            view: self.view,
+            signature_share: signature_share,
+            phase: phase,
+        };
+
+        // Broadcast ECHO to all nodes.
+        let message = ConsensusMessage::Echo(echo);
+        self.transmit(message, None).await?;
+
+        Ok(())
+    }
+
+    async fn handle_echo(&self, echo: Echo) -> ConsensusResult<()> {
+
+    }
 
     async fn handle_val(&self, block: &Block) -> ConsensusResult<()> {
         // Check the block is correctly formed.
         block.verify(&self.committee, &self.pk_set)?;
 
-        // TODO2: send threshold sign share: Lock(block.digest(), ts_share).
-        todo!()
+        // Send threshold signature share.
+        let signature_share = self.sk_share.sign(block.digest());
+        let phase = match block.proof {
+            Proof::Pi(_) => PBPhase::Phase1,
+            Proof::Sigma(_) => PBPhase::Phase2,
+        };
+        self.echo(self.name, signature_share, phase);
+
+        Ok(())
     }
 
     async fn handle_lock(&self, block: &Block, proof: Option<Proof>) -> ConsensusResult<()> {
@@ -106,7 +131,7 @@ impl Core {
 
         // Verify block.
         block.verify(&self.committee, &self.pk_set)?;
-        
+
 
         // Check value.
         ensure!(
