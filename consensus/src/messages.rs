@@ -7,19 +7,20 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashSet, BTreeMap};
 use std::convert::TryInto;
 use std::{fmt, hash};
-use threshold_crypto::{SignatureShare, PublicKeySet};
+use threshold_crypto::{SignatureShare, PublicKeySet, PublicKeyShare};
 
 pub type SeqNumber = u128;
 pub type ViewNumber = u8;
 
 // Two types of proof associated with block
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum Proof {
-    // Relates to Phase1 (see PBPhase defined below).
+    // Relates to input for Phase1 (see PBPhase defined below).
     Pi(Vec<(bool, ViewNumber, threshold_crypto::Signature)>),
 
-    // Relates to Phase2.
-    Sigma(threshold_crypto::Signature),
+    // Relates to input for Phase2.
+    // sigma1(left) for PB1 output and sigma2(right) for PB2 output.
+    Sigma(Option<threshold_crypto::Signature>, Option<threshold_crypto::Signature>),
 }
 
 // Two PB phase under SPB.
@@ -29,54 +30,32 @@ pub enum PBPhase {
     Phase2,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+impl AsRef<[u8]> for PBPhase {
+    fn as_ref(&self) -> &[u8] {
+        match self {
+            Self::Phase1 => &[0],
+            Self::Phase2 => &[1],
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum ConsensusMessage {
     Val(Block),
     Echo(Echo),
     Lock(Lock),
-    Finish(Finish),
+    Finish(Block),
     Done(Done),
-    Halt(Halt),
+    Halt(Block),    // Need to compare leader of round <epoch, view> with the block leader.
     RandomnessShare(RandomnessShare),
     RandomCoin(RandomCoin),
     PreVote(PreVote),
     Vote(Vote),
 }
 
-// pub enum ID {
-//     SMVBA(SeqNumber, ViewNumber),
-//     SPB(SeqNumber, ViewNumber, PublicKey),
-//     PB(SeqNumber, ViewNumber, PublicKey, PBPhase),
-// }
-
-// impl ID {
-//     pub fn digest_with_block(&self, block: Option<&Block>) -> Digest {
-//         let mut hasher = Sha512::new();
-//         match self {
-//             ID::SMVBA(s, v) => {
-//                 hasher.update(s.to_le_bytes());
-//                 hasher.update(v.to_le_bytes());
-//             }
-//             ID::SPB(s, v, pk) => {
-//                 hasher.update(s.to_le_bytes());
-//                 hasher.update(v.to_le_bytes());
-//                 hasher.update(pk.to_bytes());
-//             },
-//             ID::PB(s, v, pk, pp) => {
-//                 hasher.update(s.to_le_bytes());
-//                 hasher.update(v.to_le_bytes());
-//                 hasher.update(pk.0);
-//                 hasher.update(pp);
-//             }
-    
-//         };
-//         if let Some(block) = block {
-//             hasher.update(block.digest());
-//         }
-
-//         Digest(hasher.finalize().as_slice()[..32].try_into().unwrap())
-//     }
-// }
+pub trait Verifiable {
+    fn verify(&self, committee: &Committee) -> ConsensusResult<()>;
+}
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Block {
@@ -90,8 +69,8 @@ pub struct Block {
     pub proof: Proof,
 }
 
-impl Block {
-    pub fn verify(&self, committee: &Committee, pk_set: &PublicKeySet) -> ConsensusResult<()> {
+impl Verifiable for Block {
+    fn verify(&self, committee: &Committee) -> ConsensusResult<()> {
         // Ensure the authority has voting rights.
         let voting_rights = committee.stake(&self.author);
         ensure!(
@@ -124,7 +103,7 @@ impl Hash for Block {
 
         match self.proof {
             Proof::Pi(_) => hasher.update(&[0]),
-            Proof::Sigma(_) => hasher.update(&[1]),
+            Proof::Sigma(_, _) => hasher.update(&[1]),
         };
 
         Digest(hasher.finalize().as_slice()[..32].try_into().unwrap())
@@ -154,13 +133,60 @@ impl fmt::Display for Block {
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Echo {
     // Block info.
-    pub epoch: SeqNumber, 
-    pub view:ViewNumber, 
-    pub block_author: PublicKey, 
-    pub phase: PBPhase,
+    pub block_digest: Digest,
+
+    // Echo author.
+    pub author: PublicKey,
+    pub pk_share: PublicKeyShare,
 
     // Signature share signed by a valid node.
     pub signature_share: SignatureShare,
+}
+
+impl Verifiable for Echo {
+    fn verify(&self, committee: &Committee) -> ConsensusResult<()> {
+        // Ensure the authority has voting rights.
+        let voting_rights = committee.stake(&self.author);
+        ensure!(
+            voting_rights > 0,
+            ConsensusError::UnknownAuthority(self.author)
+        );
+
+        // Check the signature.
+        ensure!(
+            self.pk_share.verify(&self.signature_share, self.block_digest),
+            ConsensusError::InvalidThresholdSignature(self.author)
+        );
+
+        Ok(())
+    }
+}
+
+impl fmt::Debug for Echo {
+    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
+        // write!(
+        //     f, 
+        //     "Echo(author {}, block_author {}, epoch {}, view {}, phase {})", 
+        //     self.author,
+        //     self.block_author,
+        //     self.epoch,
+        //     self.view,
+        //     self.phase,
+        // )
+        todo!()
+    }
+}
+
+impl Hash for Echo {
+    fn digest(&self) -> Digest {
+        let mut hasher = Sha512::new();
+        hasher.update(self.block_author.0);
+        hasher.update(self.epoch.to_le_bytes());
+        hasher.update(self.view.to_le_bytes());
+        hasher.update(self.phase);
+
+        Digest(hasher.finalize().as_slice()[..32].try_into().unwrap())
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -171,6 +197,27 @@ pub struct Lock {
 
     // Threshold signature combined by PB leader.
     pub signature: threshold_crypto::Signature,
+}
+
+impl fmt::Debug for Lock{
+    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
+        todo!()
+    }
+}
+
+impl Hash for Lock {
+    fn digest(&self) -> Digest {
+        let mut hasher = Sha512::new();
+        todo!()
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct Done {
+    pub author: PublicKey,
+    pub epoch: SeqNumber,
+    pub view: ViewNumber,
+    pub signature: Signature,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -277,4 +324,16 @@ impl fmt::Debug for RandomCoin {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
         write!(f, "RandomCoin(view {}, leader {})", self.view, self.leader)
     }
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub enum PreVote {
+    Yes(Block),
+    No(SignatureShare),
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub enum Vote {
+    Yes(Block, SignatureShare),
+    No(threshold_crypto::Signature, SignatureShare),
 }

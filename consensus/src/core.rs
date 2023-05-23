@@ -1,8 +1,12 @@
-use crate::{SeqNumber, messages};
+use std::collections::{HashMap, BTreeMap};
+use std::default;
+
+use crate::{SeqNumber, ViewNumber};
+use crate::aggregator::Aggregator;
 use crate::config::{Committee, Parameters};
 use crate::error::{ConsensusError, ConsensusResult};
 use crate::leader::LeaderElector;
-use crate::messages::{Block, ViewNumber, ConsensusMessage, PBPhase, Proof, ID, ThresholdSig, Echo};
+use crate::messages::{Block, ConsensusMessage, PBPhase, Proof, Echo, Verifiable};
 use crypto::Hash as _;
 use crypto::{Digest, PublicKey, SignatureService};
 use log::debug;
@@ -27,7 +31,7 @@ pub struct Core {
     commit_channel: Sender<Block>,
     epoch: SeqNumber, //    // current epoch
     view: ViewNumber,       // current view
-    aggregator: Aggregator,
+    votes_aggregators: HashMap<Digest, Aggregator>,
     abandon_channel: ,
 }
 
@@ -39,6 +43,15 @@ impl Core {
 
     }
 
+    fn verify(&self, msg: Box<dyn Verifiable>) -> ConsensusResult<()> {
+        msg.verify(&self.committee)
+    }
+
+    // TODO: map each public key share to its corresponding pulic key.
+    fn get_public_key_share(&self, pks: PublicKey) -> Option<PublicKeyShare> {
+        todo!()
+    }
+
     // TODO: implement check_value()
     fn check_value(&self, block: &Block) -> bool {
         todo!()
@@ -48,7 +61,13 @@ impl Core {
     fn value_validation(&self, block: &Block) -> bool {
         match block.proof {
             Proof::Pi(_) => self.check_value(block),
-            Proof::Sigma(ts_sig) => self.pk_set.public_key().verify(&ts_sig, block.digest()),
+            Proof::Sigma(sigma1, _) => {
+                if let Some(sigma1) = sigma1 {
+                    self.pk_set.public_key().verify(&sigma1, block.digest())
+                } else {
+                    false
+                }
+            },
         }
     }
 
@@ -74,13 +93,12 @@ impl Core {
         Ok(())
     }
 
-    async fn echo(&self, author: PublicKey, signature_share: SignatureShare, phase: PBPhase) -> ConsensusResult<()> {
+    async fn echo(&self, block_digest: Digest, signature_share: SignatureShare) -> ConsensusResult<()> {
         let echo = Echo {
-            block_author: author,
-            epoch: self.epoch,
-            view: self.view,
-            signature_share: signature_share,
-            phase: phase,
+            block_digest,
+            author: self.name,
+            pk_share: self.pk_share,
+            signature_share,
         };
 
         // Broadcast ECHO to all nodes.
@@ -90,21 +108,53 @@ impl Core {
         Ok(())
     }
 
-    async fn handle_echo(&self, echo: Echo) -> ConsensusResult<()> {
+    async fn handle_echo(&mut self, echo: &Echo) -> ConsensusResult<()> {
+        self.verify(Box::new(echo.clone()))?;
+
+        let shares = self.votes_aggregators
+            .entry(echo.digest())
+            .or_insert_with(|| Aggregator::new())
+            .append(echo.author, ConsensusMessage::Echo(echo.clone()), &self.committee);
+
+        match shares {
+            Err(e) => Err(e),
+            // Votes not enough.
+            Ok(None) => Ok(()),
+            // Combine shares into a compete signature.
+            Ok(Some(msgs)) => {
+                let shares: Vec<SignatureShare> = msgs.into_iter()
+                    .filter_map(|s| {
+                        match s {
+                            ConsensusMessage::Echo(echo) => Some(echo.signature_share),
+                            _ => None,
+                        }}
+                    )
+                    .collect();
+
+                let shares: BTreeMap<_, _> = (0..shares.len()).map(|i| (i, shares.get(i).unwrap())).collect();
+                let threshold_signature = self.pk_set.combine_signatures(shares).expect("not enough qualified shares");
+                self.broadcast_lock();
+                Ok(())
+            },
+        }
+
+    }
+
+    async fn broadcast_lock(&self, block: &Block, threshold_signature: &threshold_crypto::Signature) -> ConsensusResult<()> {
 
     }
 
     async fn handle_val(&self, block: &Block) -> ConsensusResult<()> {
         // Check the block is correctly formed.
-        block.verify(&self.committee, &self.pk_set)?;
+        self.verify(Box::new(block.clone()))?;
 
         // Send threshold signature share.
         let signature_share = self.sk_share.sign(block.digest());
         let phase = match block.proof {
             Proof::Pi(_) => PBPhase::Phase1,
-            Proof::Sigma(_) => PBPhase::Phase2,
+            Proof::Sigma(_, _) => PBPhase::Phase2,
         };
-        self.echo(self.name, signature_share, phase);
+        self.echo(block.digest(), signature_share);
 
         Ok(())
     }
@@ -112,12 +162,6 @@ impl Core {
     async fn handle_lock(&self, block: &Block, proof: Option<Proof>) -> ConsensusResult<()> {
 
 
-    }
-
-    async fn handle_val2(&self, block: &Block, proof: ThresholdSig) -> ConsensusResult<()> {
-        // TODO1: Verify
-        // TODO2: send threshold sign share: Lock(block.digest(), ts_share).
-        todo!()
     }
 
     async fn generate_block(&self, proof: Option<Proof>) -> ConsensusResult<()> {
@@ -144,11 +188,6 @@ impl Core {
         self.transmit(message, None).await?;
          
         Ok(())
-    }
-
-
-    async fn handle_lock(&mut self, lock: &Lock) -> ConsensusResult<()> {
-
     }
 
     async fn handle_finish(&mut self, finish: &Finish) -> ConsensusResult<()> {

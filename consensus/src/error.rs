@@ -1,7 +1,8 @@
-use crate::messages::{SeqNumber, ViewNumber, Proof};
+use crate::{messages::{SeqNumber, ViewNumber, Proof}, aggregator::Identity};
 use crypto::{CryptoError, Digest, PublicKey};
 use store::StoreError;
 use thiserror::Error;
+use threshold_crypto::PublicKeyShare;
 
 #[macro_export]
 macro_rules! bail {
@@ -51,7 +52,7 @@ pub enum ConsensusError {
     RandomCoinWithWrongShares,
 
     #[error("Received more than one vote from {0}")]
-    AuthorityReuseinQC(PublicKey),
+    AuthorityReuseinQC(Identity),
 
     #[error("Received more than one timeout from {0}")]
     AuthorityReuseinTC(PublicKey),
@@ -61,6 +62,9 @@ pub enum ConsensusError {
 
     #[error("Received vote from unknown authority {0}")]
     UnknownAuthority(PublicKey),
+
+    #[error("Received vote from unknown authority from public key share {0}")]
+    UnknownAuthorityFromShare(PublicKeyShare),
 
     #[error("Received QC without a quorum")]
     QCRequiresQuorum,
