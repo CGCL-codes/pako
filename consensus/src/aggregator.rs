@@ -42,4 +42,9 @@ impl Aggregator {
         }
         Ok(None)
     }
+
+    // To see if votes meet random coin threshold.
+    pub fn ready_for_random_coin(&self, committee: &Committee) -> bool {
+        self.weight == committee.random_coin_threshold()
+    }
 }

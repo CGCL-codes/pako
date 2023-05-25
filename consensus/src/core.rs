@@ -1,12 +1,12 @@
 use std::collections::{HashMap, BTreeMap};
-use std::default;
+use std::{default, thread};
 
 use crate::{SeqNumber, ViewNumber};
 use crate::aggregator::Aggregator;
 use crate::config::{Committee, Parameters};
 use crate::error::{ConsensusError, ConsensusResult};
 use crate::leader::LeaderElector;
-use crate::messages::{Block, ConsensusMessage, PBPhase, Proof, Echo, Verifiable};
+use crate::messages::{Block, ConsensusMessage, PBPhase, Proof, Echo, Done, Finish, RandomnessShare};
 use crypto::Hash as _;
 use crypto::{Digest, PublicKey, SignatureService};
 use log::debug;
@@ -27,11 +27,13 @@ pub struct Core {
     leader_elector: LeaderElector,
     mempool_driver: MempoolDriver,
     core_channel: Receiver<ConsensusMessage>,
+    spb_channel: Receiver<ConsensusMessage>,
     network_filter: Sender<FilterInput>,
     commit_channel: Sender<Block>,
     epoch: SeqNumber, //    // current epoch
     view: ViewNumber,       // current view
-    votes_aggregators: HashMap<Digest, Aggregator>,
+    votes_aggregators: HashMap<Digest, Aggregator>, // n-f votes collector
+    locks: HashMap<Digest, Block>,  // blocks received in current view with sigma1
     abandon_channel: ,
 }
 
@@ -43,13 +45,14 @@ impl Core {
 
     }
 
-    fn verify(&self, msg: Box<dyn Verifiable>) -> ConsensusResult<()> {
-        msg.verify(&self.committee)
-    }
-
-    // TODO: map each public key share to its corresponding pulic key.
-    fn get_public_key_share(&self, pks: PublicKey) -> Option<PublicKeyShare> {
-        todo!()
+    // TODO: Implement cached block from digest.
+    fn get_block(&self, digest: &Digest) -> Block {
+        if let Some(bytes) = self.store.read(digest.to_vec()).await? {
+            let block: Block = bincode::deserialize(&bytes)?;
+            block
+        } else {
+            
+        }
     }
 
     // TODO: implement check_value()
@@ -93,12 +96,12 @@ impl Core {
         Ok(())
     }
 
-    async fn echo(&self, block_digest: Digest, signature_share: SignatureShare) -> ConsensusResult<()> {
+    async fn echo(&self, block_digest: Digest, phase: PBPhase, mut signature_service: SignatureService) -> ConsensusResult<()> {
         let echo = Echo {
             block_digest,
+            phase,
             author: self.name,
-            pk_share: self.pk_share,
-            signature_share,
+            signature_service
         };
 
         // Broadcast ECHO to all nodes.
@@ -109,10 +112,10 @@ impl Core {
     }
 
     async fn handle_echo(&mut self, echo: &Echo) -> ConsensusResult<()> {
-        self.verify(Box::new(echo.clone()))?;
+        echo.threshold_verify(&self.committee)?;
 
         let shares = self.votes_aggregators
-            .entry(echo.digest())
+            .entry(echo.block_digest.clone())
             .or_insert_with(|| Aggregator::new())
             .append(echo.author, ConsensusMessage::Echo(echo.clone()), &self.committee);
 
@@ -133,35 +136,74 @@ impl Core {
 
                 let shares: BTreeMap<_, _> = (0..shares.len()).map(|i| (i, shares.get(i).unwrap())).collect();
                 let threshold_signature = self.pk_set.combine_signatures(shares).expect("not enough qualified shares");
-                self.broadcast_lock();
-                Ok(())
+
+                let mut block = self.get_block(&echo.digest());
+                match echo.phase {
+                    PBPhase::Phase1 => {
+                        // Start the second PB.
+                        block.proof = Proof::Sigma(Some(threshold_signature), None);
+
+                        self.pb(&block).await
+                    },
+                    PBPhase::Phase2 => {
+                        // Finish SPB and broadcast FINISH.
+                        let Proof::Sigma(sigma1, _) = block.proof;
+                        block.proof = Proof::Sigma(sigma1, Some(threshold_signature));
+                        self.finish(&block).await
+                    }
+                }
             },
         }
 
     }
 
-    async fn broadcast_lock(&self, block: &Block, threshold_signature: &threshold_crypto::Signature) -> ConsensusResult<()> {
-
-    }
-
-    async fn handle_val(&self, block: &Block) -> ConsensusResult<()> {
-        // Check the block is correctly formed.
-        self.verify(Box::new(block.clone()))?;
-
-        // Send threshold signature share.
-        let signature_share = self.sk_share.sign(block.digest());
-        let phase = match block.proof {
-            Proof::Pi(_) => PBPhase::Phase1,
-            Proof::Sigma(_, _) => PBPhase::Phase2,
-        };
-        self.echo(block.digest(), signature_share);
+    async fn finish(&self, block: &Block) -> ConsensusResult<()> {
+        // Broadcast VAL to all nodes.
+        let message = ConsensusMessage::Finish(
+            Finish {
+                block: block.clone(),
+                author: self.name,
+            }
+        );
+        self.transmit(message, None).await?;
 
         Ok(())
     }
 
-    async fn handle_lock(&self, block: &Block, proof: Option<Proof>) -> ConsensusResult<()> {
+    async fn handle_finish(&self, finish: &Finish) -> ConsensusResult<()> {
+        // Verify threshold signature.
+        ensure!(
+            finish.block.check_sigma2(&self.pk_share),
+            ConsensusError::InvalidVoteProof(Some(finish.block.proof))
+        );
 
+        let finishes = self.votes_aggregators
+            .entry(finish.digest())
+            .or_insert_with(|| Aggregator::new())
+            .append(finish.author, ConsensusMessage::Finish(finish.clone()), &self.committee);
 
+        match finishes {
+            Err(e) => Err(e),
+            // Votes not enough.
+            Ok(None) => Ok(()),
+            // Broadcast Done if received n-f Finish.
+            Ok(Some(_)) => {
+                self.done(finish.block.digest()).await
+            },
+        }
+    }
+
+    async fn handle_val(&self, block: &Block) -> ConsensusResult<()> {
+        // Check the block is correctly formed.
+        block.verify(&self.committee)?;
+
+        // Send threshold signature share.
+        // let signature_share = self.sk_share.sign(block.digest());
+        let phase = match block.proof {
+            Proof::Pi(_) => PBPhase::Phase1,
+            Proof::Sigma(_, _) => PBPhase::Phase2,
+        };
+        self.echo(block.digest(), phase, signature_share).await
     }
 
     async fn generate_block(&self, proof: Option<Proof>) -> ConsensusResult<()> {
@@ -174,8 +216,7 @@ impl Core {
         debug!("Processing {:?}", block);
 
         // Verify block.
-        block.verify(&self.committee, &self.pk_set)?;
-
+        block.verify(&self.committee)?;
 
         // Check value.
         ensure!(
@@ -190,12 +231,44 @@ impl Core {
         Ok(())
     }
 
-    async fn handle_finish(&mut self, finish: &Finish) -> ConsensusResult<()> {
+    async fn done(&self, block_digest: Digest) -> ConsensusResult<()> {
+        let done = Done {
+            block_digest,
+            author: self.name,
+        };
 
+        let message = ConsensusMessage::Done(done);
+        self.transmit(message, None).await?;
+
+        Ok(())
     }
 
     async fn handle_done(&mut self, done: &Done) -> ConsensusResult<()> {
+        // TODO: n-f Done to abandon the SPBs undone.
+        let msgs = self.votes_aggregators
+            .entry(done.digest())
+            .or_insert_with(|| Aggregator::new())
+            .append(self.name, ConsensusMessage::Done(done.clone()), &self.committee);
 
+        match msgs {
+            Err(e) => return Err(e),
+            Ok(None) => (),
+            Ok(Some(_)) => self.abandon();
+        }
+
+        // f+1 Done to reveal coin in current round.
+        if let Some(aggregator) = self.votes_aggregators.get(&done.digest()) {
+            if aggregator.ready_for_random_coin(&self.committee) {
+                let randomness_share = RandomnessShare::new(
+                    self.view, 
+                    self.name, 
+                    self.signature_service.clone()
+                );
+
+            }
+        }
+
+        Ok(())
     }
 
     async fn handle_randommess_share(&mut self, randomness_share: &RandomnessShare) -> ConsensusResult<()> {
@@ -235,6 +308,8 @@ impl Core {
                 Some(msg) = self.core_channel.recv() => {
                     match msg {
                         ConsensusMessage::Val(block) => self.handle_val(&block).await,
+                        ConsensusMessage::Echo(echo) => self.handle_echo(&echo).await,
+                        ConsensusMessage::Finish(finish) => self.handle_finish(&finish).await,
                         ConsensusMessage::Halt(halt) => self.advance_epoch(),
                     }
                 }

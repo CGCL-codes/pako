@@ -1,3 +1,4 @@
+use crate::Consensus;
 use crate::config::Committee;
 use crate::error::{ConsensusError, ConsensusResult};
 use crypto::{Digest, Signature, SignatureService, Hash, PublicKey};
@@ -41,20 +42,17 @@ impl AsRef<[u8]> for PBPhase {
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum ConsensusMessage {
+    Propose(Block),
     Val(Block),
     Echo(Echo),
     Lock(Lock),
-    Finish(Block),
+    Finish(Finish),
     Done(Done),
     Halt(Block),    // Need to compare leader of round <epoch, view> with the block leader.
     RandomnessShare(RandomnessShare),
     RandomCoin(RandomCoin),
     PreVote(PreVote),
     Vote(Vote),
-}
-
-pub trait Verifiable {
-    fn verify(&self, committee: &Committee) -> ConsensusResult<()>;
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -69,8 +67,8 @@ pub struct Block {
     pub proof: Proof,
 }
 
-impl Verifiable for Block {
-    fn verify(&self, committee: &Committee) -> ConsensusResult<()> {
+impl Block {
+    pub fn verify(&self, committee: &Committee) -> ConsensusResult<()> {
         // Ensure the authority has voting rights.
         let voting_rights = committee.stake(&self.author);
         ensure!(
@@ -78,10 +76,18 @@ impl Verifiable for Block {
             ConsensusError::UnknownAuthority(self.author)
         );
 
-        // Check the signature.
+        // Check signature.
         self.signature.verify(&self.digest(), &self.author)?;
 
         Ok(())
+    }
+
+    pub fn check_sigma1(&self, external_publickey: &PublicKeyShare) -> ConsensusResult<()> {
+
+    }
+
+    pub fn check_sigma2(&self, external_publickey: &PublicKeyShare) ->  ConsensusResult<()> {
+
     }
 }
 
@@ -134,31 +140,29 @@ impl fmt::Display for Block {
 pub struct Echo {
     // Block info.
     pub block_digest: Digest,
+    pub phase: PBPhase,
 
     // Echo author.
     pub author: PublicKey,
-    pub pk_share: PublicKeyShare,
 
-    // Signature share signed by a valid node.
+    // Signature share against block digest.
     pub signature_share: SignatureShare,
 }
 
-impl Verifiable for Echo {
-    fn verify(&self, committee: &Committee) -> ConsensusResult<()> {
+impl Echo {
+    pub fn verify(&self, committee: &Committee, pk_set: &PublicKeySet) -> ConsensusResult<()> {
         // Ensure the authority has voting rights.
-        let voting_rights = committee.stake(&self.author);
         ensure!(
-            voting_rights > 0,
+            committee.stake(&self.author) > 0,
             ConsensusError::UnknownAuthority(self.author)
         );
 
+        let tss_pk = pk_set.public_key_share(committee.id(self.author));
         // Check the signature.
         ensure!(
-            self.pk_share.verify(&self.signature_share, self.block_digest),
+            tss_pk.verify(&self.signature_share, &self.digest()),
             ConsensusError::InvalidThresholdSignature(self.author)
-        );
-
-        Ok(())
+        )
     }
 }
 
@@ -179,11 +183,11 @@ impl fmt::Debug for Echo {
 
 impl Hash for Echo {
     fn digest(&self) -> Digest {
+        // Echo is distinguished by <epoch, view, phase, ECHO>,
+        // which can be implemented by <block_digest, ECHO>.
         let mut hasher = Sha512::new();
-        hasher.update(self.block_author.0);
-        hasher.update(self.epoch.to_le_bytes());
-        hasher.update(self.view.to_le_bytes());
-        hasher.update(self.phase);
+        hasher.update(self.block_digest);
+        hasher.update("ECHO");
 
         Digest(hasher.finalize().as_slice()[..32].try_into().unwrap())
     }
@@ -212,12 +216,40 @@ impl Hash for Lock {
     }
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct Finish {
+    pub block: Block,
+    pub author: PublicKey,
+}
+
+impl Hash for Finish {
+    fn digest(&self) -> Digest {
+        // Finish is distinguished by <epoch, view, FINISH>,
+        // which can be implemented by <block_digest, FINISH>.
+        let mut hasher = Sha512::new();
+        hasher.update(self.block.digest());
+        hasher.update("FINISH");
+
+        Digest(hasher.finalize().as_slice()[..32].try_into().unwrap())
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Done {
+    pub block_digest: Digest,
     pub author: PublicKey,
-    pub epoch: SeqNumber,
-    pub view: ViewNumber,
-    pub signature: Signature,
+}
+
+impl Hash for Done {
+    fn digest(&self) -> Digest {
+        // Finish is distinguished by <epoch, view, Done>,
+        // which can be implemented by <block_digest, Done>.
+        let mut hasher = Sha512::new();
+        hasher.update(self.block_digest);
+        hasher.update("FINISH");
+
+        Digest(hasher.finalize().as_slice()[..32].try_into().unwrap())
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
