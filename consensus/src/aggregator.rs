@@ -13,9 +13,9 @@ use std::collections::{HashMap, HashSet};
 pub mod aggregator_tests;
 
 pub struct Aggregator {
-    weight: Stake,
-    votes: Vec<ConsensusMessage>,
-    used: HashSet<PublicKey>,
+    pub weight: Stake,
+    pub votes: Vec<ConsensusMessage>,
+    pub used: HashSet<PublicKey>,
 }
 
 impl Aggregator {

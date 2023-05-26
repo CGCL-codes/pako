@@ -150,6 +150,19 @@ pub struct Echo {
 }
 
 impl Echo {
+    pub async fn new(block_digest: Digest, 
+        phase: PBPhase, 
+        author: PublicKey,
+        mut signature_service: SignatureService
+    ) -> Self {
+        let signature_share = signature_service.request_tss_signature(block_digest.clone()).await.unwrap();
+        Self {
+            block_digest,
+            phase,
+            author,
+            signature_share,
+        }
+    }
     pub fn verify(&self, committee: &Committee, pk_set: &PublicKeySet) -> ConsensusResult<()> {
         // Ensure the authority has voting rights.
         ensure!(
@@ -225,9 +238,9 @@ pub struct Finish {
 impl Hash for Finish {
     fn digest(&self) -> Digest {
         // Finish is distinguished by <epoch, view, FINISH>,
-        // which can be implemented by <block_digest, FINISH>.
         let mut hasher = Sha512::new();
-        hasher.update(self.block.digest());
+        hasher.update(self.block.epoch.to_le_bytes());
+        hasher.update(self.block.view.to_le_bytes());
         hasher.update("FINISH");
 
         Digest(hasher.finalize().as_slice()[..32].try_into().unwrap())
@@ -254,6 +267,7 @@ impl Hash for Done {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct RandomnessShare {
+    pub epoch: SeqNumber, // eopch
     pub view: ViewNumber, // view
     pub author: PublicKey,
     pub signature_share: SignatureShare,
@@ -261,15 +275,18 @@ pub struct RandomnessShare {
 
 impl RandomnessShare {
     pub async fn new(
+        epoch: SeqNumber,
         view: ViewNumber,
         author: PublicKey,
         mut signature_service: SignatureService,
     ) -> Self {
         let mut hasher = Sha512::new();
+        hasher.update(epoch.to_le_bytes());
         hasher.update(view.to_le_bytes());
         let digest = Digest(hasher.finalize().as_slice()[..32].try_into().unwrap());
         let signature_share = signature_service.request_tss_signature(digest).await.unwrap();
         Self {
+            epoch,
             view,
             author,
             signature_share,
@@ -296,7 +313,9 @@ impl RandomnessShare {
 impl Hash for RandomnessShare {
     fn digest(&self) -> Digest {
         let mut hasher = Sha512::new();
+        hasher.update(self.epoch.to_le_bytes());
         hasher.update(self.view.to_le_bytes());
+        hasher.update("RANDOMNESS_SHARE");
         Digest(hasher.finalize().as_slice()[..32].try_into().unwrap())
     }
 }
@@ -309,6 +328,7 @@ impl fmt::Debug for RandomnessShare {
 
 #[derive(Clone, Serialize, Deserialize, Default)]
 pub struct RandomCoin {
+    pub epoch: SeqNumber, // epoch
     pub view: ViewNumber, // view
     pub leader: PublicKey,  // elected leader of the view
     pub shares: Vec<RandomnessShare>,
@@ -355,6 +375,16 @@ impl RandomCoin {
 impl fmt::Debug for RandomCoin {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
         write!(f, "RandomCoin(view {}, leader {})", self.view, self.leader)
+    }
+}
+
+impl Hash for RandomCoin {
+    fn digest(&self) -> Digest {
+        let mut hasher = Sha512::new();
+        hasher.update(self.epoch.to_le_bytes());
+        hasher.update(self.view.to_le_bytes());
+        hasher.update("RANDOM_COIN");
+        Digest(hasher.finalize().as_slice()[..32].try_into().unwrap())
     }
 }
 
