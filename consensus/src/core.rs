@@ -1,4 +1,5 @@
 use std::collections::{HashMap, BTreeMap};
+use std::task::Waker;
 use std::{default, thread};
 
 use crate::{SeqNumber, ViewNumber};
@@ -35,6 +36,7 @@ pub struct Core {
     votes_aggregators: HashMap<Digest, Aggregator>, // n-f votes collector
     locks: HashMap<Digest, Block>,  // blocks received in current view with sigma1
     random_coin: HashMap<Digest, RandomCoin>,
+    election_states: HashMap<Digest, ElectionState>, // election states
     abandon_channel: ,
 }
 
@@ -56,16 +58,24 @@ impl Core {
         }
     }
 
-    // Get leaders of previous <epoch, view>
-    // or get current leader after leader election. 
-    fn get_leader(&self, epoch: EpochNumber, view: ViewNumber) -> PublicKey {
+    // Get the leader of <epoch, view>.
+    async fn get_leader(&self, epoch: EpochNumber, view: ViewNumber) -> Option<PublicKey> {
+        if epoch > self.epoch || epoch == self.epoch && view > self.view {
+            return None;
+        }
+
         let mut hasher = Sha512::new();
         hasher.update(epoch.to_le_bytes());
         hasher.update(view.to_le_bytes());
         hasher.update("RANDOM_COIN");
         let digest = Digest(hasher.finalize().as_slice()[..32].try_into().unwrap());
 
-        self.random_coin.get(&digest).unwrap().leader
+        if epoch == self.epoch && view == self.view {
+            
+        } else {
+            Some(self.random_coin.get(&digest).unwrap().leader)
+        }
+        
     }
 
     // TODO: implement check_value()
@@ -332,7 +342,7 @@ impl Core {
     }
 
     async fn handle_random_coin(&mut self, random_coin: RandomCoin) -> ConsensusResult<()> {
-        // Ignore coins of previous epoch or views.
+        // Ignore coins of previous epochs or views.
         if random_coin.epoch < self.epoch
         || random_coin.epoch == self.epoch && random_coin.view < self.view
         || self.random_coin.contains_key(&random_coin.digest()) {
@@ -347,7 +357,7 @@ impl Core {
         let message = ConsensusMessage::RandomCoin(random_coin.clone());
         self.transmit(message, None).await?;
 
-        // If receives the current leader's Finish, halt and output.
+        // Having had received the current leader's Finish, halt and output.
         let mut hasher = Sha512::new();
         hasher.update(self.epoch.to_le_bytes());
         hasher.update(self.view.to_le_bytes());
@@ -375,7 +385,7 @@ impl Core {
 
     async fn handle_halt(&self, block: &Block) -> ConsensusResult<()> {
         if block.author == self.get_leader(block.epoch, block.view) {
-            
+
         }
     }
 

@@ -5,7 +5,7 @@ mod config;
 mod consensus;
 mod core;
 mod filter;
-mod leader;
+mod election;
 mod mempool;
 mod messages;
 
