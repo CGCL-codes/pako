@@ -1,4 +1,4 @@
-use crate::{messages::{SeqNumber, ViewNumber, Proof}, aggregator::Identity};
+use crate::messages::{SeqNumber, ViewNumber, Proof};
 use crypto::{CryptoError, Digest, PublicKey};
 use store::StoreError;
 use thiserror::Error;
@@ -7,7 +7,7 @@ use threshold_crypto::PublicKeyShare;
 #[macro_export]
 macro_rules! bail {
     ($e:expr) => {
-        return Err($e);
+        return Err($e)
     };
 }
 

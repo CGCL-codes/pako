@@ -188,11 +188,11 @@ impl Core {
         Ok(())
     }
 
-    async fn handle_finish(&self, finish: &Finish) -> ConsensusResult<()> {
+    async fn handle_finish(&mut self, finish: &Finish) -> ConsensusResult<()> {
         // Verify threshold signature.
         ensure!(
             finish.block.check_sigma2(&self.pk_share),
-            ConsensusError::InvalidVoteProof(Some(finish.block.proof))
+            ConsensusError::InvalidVoteProof(Some(finish.block.proof.clone()))
         );
 
         let finishes = self.votes_aggregators

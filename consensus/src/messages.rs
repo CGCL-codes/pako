@@ -82,11 +82,11 @@ impl Block {
         Ok(())
     }
 
-    pub fn check_sigma1(&self, external_publickey: &PublicKeyShare) -> ConsensusResult<()> {
+    pub fn check_sigma1(&self, external_publickey: &PublicKeyShare) -> bool {
 
     }
 
-    pub fn check_sigma2(&self, external_publickey: &PublicKeyShare) ->  ConsensusResult<()> {
+    pub fn check_sigma2(&self, external_publickey: &PublicKeyShare) ->  bool {
 
     }
 }
