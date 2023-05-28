@@ -1,5 +1,5 @@
 use crate::Consensus;
-use crate::config::Committee;
+use crate::config::{Committee, EpochNumber};
 use crate::error::{ConsensusError, ConsensusResult};
 use crypto::{Digest, Signature, SignatureService, Hash, PublicKey};
 use ed25519_dalek::Digest as _;
@@ -12,6 +12,19 @@ use threshold_crypto::{SignatureShare, PublicKeySet, PublicKeyShare};
 
 pub type SeqNumber = u128;
 pub type ViewNumber = u8;
+
+#[macro_export]
+macro_rules! digest {
+    ($($x: expr), +) => {
+        {
+            let mut hasher = Sha512::new();
+            $(
+                hasher.update($x);
+            )+
+            Digest(hasher.finalize().as_slice()[..32].try_into().unwrap())
+        }
+    };
+}
 
 // Two types of proof associated with block
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -175,7 +188,9 @@ impl Echo {
         ensure!(
             tss_pk.verify(&self.signature_share, &self.digest()),
             ConsensusError::InvalidThresholdSignature(self.author)
-        )
+        );
+
+        Ok(())
     }
 }
 
@@ -198,11 +213,7 @@ impl Hash for Echo {
     fn digest(&self) -> Digest {
         // Echo is distinguished by <epoch, view, phase, ECHO>,
         // which can be implemented by <block_digest, ECHO>.
-        let mut hasher = Sha512::new();
-        hasher.update(self.block_digest);
-        hasher.update("ECHO");
-
-        Digest(hasher.finalize().as_slice()[..32].try_into().unwrap())
+        digest!(self.block_digest, "ECHO")
     }
 }
 
@@ -238,30 +249,29 @@ pub struct Finish {
 impl Hash for Finish {
     fn digest(&self) -> Digest {
         // Finish is distinguished by <epoch, view, FINISH>,
-        let mut hasher = Sha512::new();
-        hasher.update(self.block.epoch.to_le_bytes());
-        hasher.update(self.block.view.to_le_bytes());
-        hasher.update("FINISH");
-
-        Digest(hasher.finalize().as_slice()[..32].try_into().unwrap())
+        digest!(
+            self.block.epoch.to_le_bytes(),
+            self.block.view.to_le_bytes(),
+            "FINISH"
+        )
     }
 }
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Done {
-    pub block_digest: Digest,
+    pub epoch: EpochNumber,
+    pub view: ViewNumber,
     pub author: PublicKey,
 }
 
 impl Hash for Done {
     fn digest(&self) -> Digest {
-        // Finish is distinguished by <epoch, view, Done>,
-        // which can be implemented by <block_digest, Done>.
-        let mut hasher = Sha512::new();
-        hasher.update(self.block_digest);
-        hasher.update("FINISH");
-
-        Digest(hasher.finalize().as_slice()[..32].try_into().unwrap())
+        // Done is distinguished by <epoch, view, Done>,
+        digest!(
+            self.epoch.to_le_bytes(),
+            self.view.to_le_bytes(),
+            "DONE"
+        )
     }
 }
 
@@ -280,10 +290,7 @@ impl RandomnessShare {
         author: PublicKey,
         mut signature_service: SignatureService,
     ) -> Self {
-        let mut hasher = Sha512::new();
-        hasher.update(epoch.to_le_bytes());
-        hasher.update(view.to_le_bytes());
-        let digest = Digest(hasher.finalize().as_slice()[..32].try_into().unwrap());
+        let digest = digest!(epoch.to_le_bytes(), view.to_le_bytes());
         let signature_share = signature_service.request_tss_signature(digest).await.unwrap();
         Self {
             epoch,
@@ -312,11 +319,11 @@ impl RandomnessShare {
 
 impl Hash for RandomnessShare {
     fn digest(&self) -> Digest {
-        let mut hasher = Sha512::new();
-        hasher.update(self.epoch.to_le_bytes());
-        hasher.update(self.view.to_le_bytes());
-        hasher.update("RANDOMNESS_SHARE");
-        Digest(hasher.finalize().as_slice()[..32].try_into().unwrap())
+        digest!(
+            self.epoch.to_le_bytes(),
+            self.view.to_le_bytes(),
+            "RANDOMNESS_SHARE"
+        )
     }
 }
 
@@ -380,11 +387,11 @@ impl fmt::Debug for RandomCoin {
 
 impl Hash for RandomCoin {
     fn digest(&self) -> Digest {
-        let mut hasher = Sha512::new();
-        hasher.update(self.epoch.to_le_bytes());
-        hasher.update(self.view.to_le_bytes());
-        hasher.update("RANDOM_COIN");
-        Digest(hasher.finalize().as_slice()[..32].try_into().unwrap())
+        digest!(
+            self.epoch.to_le_bytes(),
+            self.view.to_le_bytes(),
+            "RANDOM_COIN"
+        )
     }
 }
 

@@ -1,10 +1,14 @@
+use std::cell::RefCell;
 use std::collections::{HashMap, BTreeMap};
+use std::rc::Rc;
+use std::sync::Mutex;
 use std::task::Waker;
 use std::{default, thread};
 
 use crate::{SeqNumber, ViewNumber};
 use crate::aggregator::Aggregator;
 use crate::config::{Committee, Parameters, EpochNumber};
+use crate::election::{ElectionState, ElectionFuture};
 use crate::error::{ConsensusError, ConsensusResult};
 use crate::messages::{Block, ConsensusMessage, PBPhase, Proof, Echo, Done, Finish, RandomnessShare, RandomCoin};
 use crypto::Hash as _;
@@ -36,7 +40,7 @@ pub struct Core {
     votes_aggregators: HashMap<Digest, Aggregator>, // n-f votes collector
     locks: HashMap<Digest, Block>,  // blocks received in current view with sigma1
     random_coin: HashMap<Digest, RandomCoin>,
-    election_states: HashMap<Digest, ElectionState>, // election states
+    election_states: HashMap<Digest, Rc<RefCell<ElectionState>>>, // election states of each <epoch, view>
     abandon_channel: ,
 }
 
@@ -59,23 +63,25 @@ impl Core {
     }
 
     // Get the leader of <epoch, view>.
-    async fn get_leader(&self, epoch: EpochNumber, view: ViewNumber) -> Option<PublicKey> {
+    async fn get_leader(&mut self, epoch: EpochNumber, view: ViewNumber) -> Option<PublicKey> {
         if epoch > self.epoch || epoch == self.epoch && view > self.view {
             return None;
         }
 
-        let mut hasher = Sha512::new();
-        hasher.update(epoch.to_le_bytes());
-        hasher.update(view.to_le_bytes());
-        hasher.update("RANDOM_COIN");
-        let digest = Digest(hasher.finalize().as_slice()[..32].try_into().unwrap());
-
+        let digest = digest!(epoch.to_le_bytes(), view.to_le_bytes(), "RANDOM_COIN");
         if epoch == self.epoch && view == self.view {
-            
+            let election_state = self.election_states.get(
+                &digest!(self.epoch.to_le_bytes(), self.view.to_le_bytes()))
+                .unwrap();
+            let election_state = Rc::clone(election_state);
+            let election_fut = ElectionFuture {
+                election_state,
+            };
+            election_fut.await
         } else {
-            Some(self.random_coin.get(&digest).unwrap().leader)
+            return Some(self.random_coin.get(&digest).unwrap().leader)
         }
-        
+        todo!()
     }
 
     // TODO: implement check_value()
@@ -206,7 +212,7 @@ impl Core {
             Ok(None) => Ok(()),
             // Broadcast Done if received n-f Finish.
             Ok(Some(_)) => {
-                self.done(finish.block.digest()).await
+                self.done(finish.block.epoch, finish.block.view).await
             },
         }
     }
@@ -249,9 +255,10 @@ impl Core {
         Ok(())
     }
 
-    async fn done(&self, block_digest: Digest) -> ConsensusResult<()> {
+    async fn done(&self, epoch: EpochNumber, view: ViewNumber) -> ConsensusResult<()> {
         let done = Done {
-            block_digest,
+            epoch,
+            view,
             author: self.name,
         };
 
@@ -271,7 +278,10 @@ impl Core {
         match msgs {
             Err(e) => return Err(e),
             Ok(None) => (),
-            Ok(Some(_)) => self.abandon();
+            Ok(Some(_)) => {
+                // After collecting n-f Done, abandon SPB instance.
+                self.abandon();
+            },
         }
 
         // f+1 Done to reveal coin in current round.
@@ -352,17 +362,27 @@ impl Core {
         random_coin.verify(&self.committee, &self.pk_set)?;
         
         self.random_coin.insert(random_coin.digest(), random_coin.clone());
+        // Set ElectionState of <epoch, view> of done msg as `done`,
+        // this wakes up the Waker of ElectionFuture of get_leader(),
+        // then get_leader().await makes progress.
+        let digest = digest!(self.epoch.to_le_bytes(), self.view.to_le_bytes());
+        if let Some(election_state) = self.election_states.get_mut(&digest) {
+            election_state.done = true;
+            election_state.wakers.iter().map(|waker| {
+                waker.wake();
+            });
+        }
 
         // Multicast the random coin.
         let message = ConsensusMessage::RandomCoin(random_coin.clone());
         self.transmit(message, None).await?;
 
         // Having had received the current leader's Finish, halt and output.
-        let mut hasher = Sha512::new();
-        hasher.update(self.epoch.to_le_bytes());
-        hasher.update(self.view.to_le_bytes());
-        hasher.update("FINISH");
-        let finish_digest = Digest(hasher.finalize().as_slice()[..32].try_into().unwrap());
+        let finish_digest = digest!(
+            self.epoch.to_le_bytes(), 
+            self.view.to_le_bytes(),
+            "FINISH"
+        );
         let finishes = &self.votes_aggregators.get(&finish_digest).unwrap().votes;
         let leader_finish = finishes.iter()
             .filter_map(|f| {
@@ -397,8 +417,23 @@ impl Core {
 
     }
 
-    fn advance_epoch(&mut self) -> ConsensusResult<()> {
+    fn advance_view(&mut self) -> ConsensusResult<()> {
+        self.view += 1;
 
+        // Init eletion state to be undone.
+        let digest = digest!(self.epoch.to_le_bytes(), self.view.to_le_bytes());
+        self.election_states
+            .entry(digest)
+            .or_insert(ElectionState { done: false, wakers: Vec::new() });
+
+        Ok(())
+    }
+
+    fn advance_epoch(&mut self) -> ConsensusResult<()> {
+        self.epoch += 1;
+        self.view = 0;
+
+        todo!()
     }
 
     pub async fn run(&mut self) {

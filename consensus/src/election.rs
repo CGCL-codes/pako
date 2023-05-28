@@ -1,25 +1,24 @@
-use std::{task::{Waker, Poll, Context}, sync::Mutex, rc::Rc, pin::Pin};
+use std::{task::{Waker, Poll, Context}, sync::Mutex, rc::Rc, pin::Pin, cell::RefCell};
 
 use futures::Future;
 
-struct ElectionState {
-    done: bool,
-    waker: Option<Waker>,
+pub struct ElectionState {
+    pub done: bool,
+    pub wakers: Vec<Waker>,
 }
 
-struct ElectionFuture {
-    election_state: Rc<Mutex<ElectionState>>,
+pub struct ElectionFuture {
+    election_state: Rc<RefCell<ElectionState>>,
 }
 
 impl Future for ElectionFuture {
     type Output = ();
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let mut election_state = self.election_state.lock().unwrap();
-        if election_state.done {
+        if self.election_state.borrow().done {
             Poll::Ready(())
         } else {
-            election_state.waker = Some(cx.waker().clone());
+            self.election_state.borrow_mut().wakers.push(cx.waker().clone());
             Poll::Pending
         }
     }
