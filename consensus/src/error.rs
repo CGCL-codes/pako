@@ -2,7 +2,7 @@ use crate::messages::{SeqNumber, ViewNumber, Proof};
 use crypto::{CryptoError, Digest, PublicKey};
 use store::StoreError;
 use thiserror::Error;
-use threshold_crypto::PublicKeyShare;
+use threshold_crypto::{PublicKeyShare, SignatureShare};
 
 #[macro_export]
 macro_rules! bail {
@@ -36,11 +36,17 @@ pub enum ConsensusError {
     #[error("Node {0} is not in the committee")]
     NotInCommittee(PublicKey),
 
+    #[error("Invalid epoch {0} or view {1}")]
+    InvalidEpochOrView(SeqNumber, ViewNumber),
+
     #[error("Invalid vote proof")]
     InvalidVoteProof(Option<Proof>),
 
     #[error("Invalid signature")]
     InvalidSignature(#[from] CryptoError),
+
+    #[error("Invalid signature share")]
+    InvalidSignatureShare(SignatureShare),
 
     #[error("Invalid threshold signature from {0}")]
     InvalidThresholdSignature(PublicKey),

@@ -5,6 +5,7 @@ use crypto::{Digest, Signature, SignatureService, Hash, PublicKey};
 use ed25519_dalek::Digest as _;
 use ed25519_dalek::Sha512;
 use serde::{Deserialize, Serialize};
+use std::borrow::Borrow;
 use std::collections::{HashSet, BTreeMap};
 use std::convert::TryInto;
 use std::{fmt, hash};
@@ -95,12 +96,18 @@ impl Block {
         Ok(())
     }
 
-    pub fn check_sigma1(&self, external_publickey: &PublicKeyShare) -> bool {
-
+    pub fn check_sigma1(&self, pk: &threshold_crypto::PublicKey) -> bool {
+        if let Proof::Sigma(Some(sigma1), _) = self.proof {
+            return pk.verify(&sigma1, self.digest())
+        }
+        false
     }
 
-    pub fn check_sigma2(&self, external_publickey: &PublicKeyShare) ->  bool {
-
+    pub fn check_sigma2(&self, pk: &threshold_crypto::PublicKey) -> bool {
+        if let Proof::Sigma(_, Some(sigma2)) = self.proof {
+            return pk.verify(&sigma2, self.digest())
+        }
+        false
     }
 }
 
@@ -153,6 +160,7 @@ impl fmt::Display for Block {
 pub struct Echo {
     // Block info.
     pub block_digest: Digest,
+    pub block_author: PublicKey,
     pub phase: PBPhase,
 
     // Echo author.
@@ -164,6 +172,7 @@ pub struct Echo {
 
 impl Echo {
     pub async fn new(block_digest: Digest, 
+        block_author: PublicKey,
         phase: PBPhase, 
         author: PublicKey,
         mut signature_service: SignatureService
@@ -171,6 +180,7 @@ impl Echo {
         let signature_share = signature_service.request_tss_signature(block_digest.clone()).await.unwrap();
         Self {
             block_digest,
+            block_author,
             phase,
             author,
             signature_share,
@@ -183,10 +193,10 @@ impl Echo {
             ConsensusError::UnknownAuthority(self.author)
         );
 
-        let tss_pk = pk_set.public_key_share(committee.id(self.author));
-        // Check the signature.
+        let pk_share = pk_set.public_key_share(committee.id(self.author));
+        // Check the signature share.
         ensure!(
-            tss_pk.verify(&self.signature_share, &self.digest()),
+            pk_share.verify(&self.signature_share, &self.block_digest),
             ConsensusError::InvalidThresholdSignature(self.author)
         );
 
@@ -396,13 +406,91 @@ impl Hash for RandomCoin {
 }
 
 #[derive(Serialize, Deserialize, Clone)]
-pub enum PreVote {
-    Yes(Block),
-    No(SignatureShare),
+pub struct PreVote {
+    pub author: PublicKey,
+    pub body: PreVoteEnum,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
-pub enum Vote {
+pub enum PreVoteEnum {
+    Yes(Block),
+
+    // SignatureShare against message digest <epoch, view, leader>.
+    No(EpochNumber, ViewNumber, PublicKey, SignatureShare),
+}
+
+impl PreVote {
+    pub fn verify(&self, committee: &Committee, pk_set: &PublicKeySet) -> ConsensusResult<()> {
+        match self.body {
+            PreVoteEnum::Yes(block) => {
+                ensure!(
+                    block.check_sigma1(&pk_set.public_key()),
+                    ConsensusError::InvalidVoteProof(Some(block.proof))
+                )
+            },
+            PreVoteEnum::No(_, _, _, share) => {
+                let pk_share = pk_set.public_key_share(committee.id(self.author));
+
+                // In `No` prevote, the digest to verify share is simply the digest of PreVote itself.
+                // This is enough to differentiate from digest of `Yes` prevote, which is digest of block.
+                ensure!(
+                    pk_share.verify(&share, self.digest()),
+                    ConsensusError::InvalidSignatureShare(share)
+                )
+            },
+        }
+    }
+}
+
+impl Hash for PreVote {
+    fn digest(&self) -> Digest {
+        match self.body {
+            PreVoteEnum::Yes(block) => digest!(
+                block.epoch.to_le_bytes(),
+                block.view.to_le_bytes(),
+                block.author.0,
+                "PREVOTE"
+            ),
+            PreVoteEnum::No(epoch, view, author, _) => digest!(
+                epoch.to_le_bytes(),
+                view.to_le_bytes(),
+                author.0,
+                "PREVOTE"
+            ),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct Vote {
+    pub author: PublicKey,
+    pub body: VoteEnum,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub enum VoteEnum {
     Yes(Block, SignatureShare),
-    No(threshold_crypto::Signature, SignatureShare),
+    
+    // If received a yes prevote, threshold signature is set to sigma1 carried by block,
+    // else is combined through n-f shares from PreVote.
+    No(EpochNumber, ViewNumber, PublicKey, threshold_crypto::Signature, SignatureShare),
+}
+
+impl Hash for Vote {
+    fn digest(&self) -> Digest {
+        match self.body {
+            VoteEnum::Yes(block, _) => digest!(
+                block.epoch.to_le_bytes(),
+                block.view.to_le_bytes(),
+                block.author.0,
+                "VOTE"
+            ),
+            VoteEnum::No(epoch, view, author, _, _) => digest!(
+                epoch.to_le_bytes(),
+                view.to_le_bytes(),
+                author.0,
+                "VOTE"
+            ),
+        }
+    }
 }
