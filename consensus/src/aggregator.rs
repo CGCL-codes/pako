@@ -27,7 +27,6 @@ impl Aggregator {
         }
     }
 
-    /// Try to append a signature to a (partial) quorum.
     pub fn append(&mut self, author: PublicKey, vote: ConsensusMessage, committee: &Committee) -> ConsensusResult<Option<Vec<ConsensusMessage>>> {
         // Ensure it is the first time this authority votes.
         ensure!(
@@ -36,7 +35,12 @@ impl Aggregator {
         );
         self.votes.push(vote);
         self.weight += committee.stake(&author);
-        if self.weight >= committee.quorum_threshold() {
+
+        let threshold = match vote {
+            ConsensusMessage::RandomnessShare(_) => committee.random_coin_threshold(),
+            _ => committee.quorum_threshold(),
+        };
+        if self.weight >= threshold {
             self.weight = 0; // Ensures QC is only made once.
             return Ok(Some(self.votes));
         }

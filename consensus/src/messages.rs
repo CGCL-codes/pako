@@ -31,7 +31,7 @@ macro_rules! digest {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum Proof {
     // Relates to input for Phase1 (see PBPhase defined below).
-    Pi(Vec<(bool, ViewNumber, threshold_crypto::Signature)>),
+    Pi(Vec::<(bool, ViewNumber, threshold_crypto::Signature)>),
 
     // Relates to input for Phase2.
     // sigma1(left) for PB1 output and sigma2(right) for PB2 output.
@@ -197,7 +197,7 @@ impl Echo {
         // Check the signature share.
         ensure!(
             pk_share.verify(&self.signature_share, &self.block_digest),
-            ConsensusError::InvalidThresholdSignature(self.author)
+            ConsensusError::InvalidSignatureShare(self.author)
         );
 
         Ok(())
@@ -316,11 +316,11 @@ impl RandomnessShare {
             committee.stake(&self.author) > 0,
             ConsensusError::UnknownAuthority(self.author)
         );
-        let tss_pk = pk_set.public_key_share(committee.id(self.author));
+        let share = pk_set.public_key_share(committee.id(self.author));
         // Check the signature.
         ensure!(
-            tss_pk.verify(&self.signature_share, &self.digest()),
-            ConsensusError::InvalidThresholdSignature(self.author)
+            share.verify(&self.signature_share, &self.digest()),
+            ConsensusError::InvalidSignatureShare(self.author)
         );
 
         Ok(())
@@ -407,16 +407,25 @@ impl Hash for RandomCoin {
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct PreVote {
+    // PreVote author.
     pub author: PublicKey,
+
+    // <epoch, view, leader>
+    pub epoch: EpochNumber,
+    pub view: ViewNumber,
+    pub leader: PublicKey,
+
+    // `Yes` or `No` prevote.
     pub body: PreVoteEnum,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
 pub enum PreVoteEnum {
+    // Leader's block
     Yes(Block),
 
     // SignatureShare against message digest <epoch, view, leader>.
-    No(EpochNumber, ViewNumber, PublicKey, SignatureShare),
+    No(SignatureShare),
 }
 
 impl PreVote {
@@ -428,14 +437,14 @@ impl PreVote {
                     ConsensusError::InvalidVoteProof(Some(block.proof))
                 )
             },
-            PreVoteEnum::No(_, _, _, share) => {
+            PreVoteEnum::No(share) => {
                 let pk_share = pk_set.public_key_share(committee.id(self.author));
 
                 // In `No` prevote, the digest to verify share is simply the digest of PreVote itself.
                 // This is enough to differentiate from digest of `Yes` prevote, which is digest of block.
                 ensure!(
                     pk_share.verify(&share, self.digest()),
-                    ConsensusError::InvalidSignatureShare(share)
+                    ConsensusError::InvalidSignatureShare(self.author)
                 )
             },
         }
@@ -444,53 +453,87 @@ impl PreVote {
 
 impl Hash for PreVote {
     fn digest(&self) -> Digest {
-        match self.body {
-            PreVoteEnum::Yes(block) => digest!(
-                block.epoch.to_le_bytes(),
-                block.view.to_le_bytes(),
-                block.author.0,
-                "PREVOTE"
-            ),
-            PreVoteEnum::No(epoch, view, author, _) => digest!(
-                epoch.to_le_bytes(),
-                view.to_le_bytes(),
-                author.0,
-                "PREVOTE"
-            ),
-        }
+        digest!(
+            self.epoch.to_le_bytes(),
+            self.view.to_le_bytes(),
+            self.author.0,
+            "PREVOTE"
+        )
     }
 }
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Vote {
+    // Vote author.
     pub author: PublicKey,
+
+    // <epoch, view, leader>
+    pub epoch: EpochNumber,
+    pub view: ViewNumber,
+    pub leader: PublicKey,
+
+    // `Yes` or `No` vote.
     pub body: VoteEnum,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
 pub enum VoteEnum {
+    // Leader's block, and a share signed against this Vote.
     Yes(Block, SignatureShare),
     
     // If received a yes prevote, threshold signature is set to sigma1 carried by block,
     // else is combined through n-f shares from PreVote.
-    No(EpochNumber, ViewNumber, PublicKey, threshold_crypto::Signature, SignatureShare),
+    No(threshold_crypto::Signature, SignatureShare),
+}
+
+impl Vote {
+    pub fn verify(&self, committee: &Committee, pk_set: &PublicKeySet) -> ConsensusResult<()> {
+        match self.body {
+            VoteEnum::Yes(block, share) => {
+                // Verify sigma1.
+                ensure!(
+                    block.check_sigma1(&pk_set.public_key()),
+                    ConsensusError::InvalidVoteProof(Some(block.proof))
+                );
+
+                // Verify sig share.
+                let pk_share = pk_set.public_key_share(committee.id(self.author));
+                ensure!(
+                    pk_share.verify(&share, block.digest()),
+                    ConsensusError::InvalidSignatureShare(self.author)
+                )
+            },
+            VoteEnum::No(sig, share) => {
+                // Verify threshold signature from n-f `No` PreVotes.
+                let digest = digest!(
+                    self.epoch.to_le_bytes(),
+                    self.view.to_le_bytes(),
+                    self.leader.0,
+                    "PREVOTE"
+                );  
+                ensure!(
+                    pk_set.public_key().verify(&sig, digest),
+                    ConsensusError::InvalidThresholdSignature(self.author)
+                );
+
+                // Verify sig share.
+                let pk_share = pk_set.public_key_share(committee.id(self.author));
+                ensure!(
+                    pk_share.verify(&share, self.digest()),
+                    ConsensusError::InvalidSignatureShare(self.author)
+                )
+            },
+        }
+    }
 }
 
 impl Hash for Vote {
     fn digest(&self) -> Digest {
-        match self.body {
-            VoteEnum::Yes(block, _) => digest!(
-                block.epoch.to_le_bytes(),
-                block.view.to_le_bytes(),
-                block.author.0,
-                "VOTE"
-            ),
-            VoteEnum::No(epoch, view, author, _, _) => digest!(
-                epoch.to_le_bytes(),
-                view.to_le_bytes(),
-                author.0,
-                "VOTE"
-            ),
-        }
+        digest!(
+            self.epoch.to_le_bytes(),
+            self.view.to_le_bytes(),
+            self.author.0,
+            "VOTE"
+        )
     }
 }

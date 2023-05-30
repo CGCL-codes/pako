@@ -45,8 +45,8 @@ pub enum ConsensusError {
     #[error("Invalid signature")]
     InvalidSignature(#[from] CryptoError),
 
-    #[error("Invalid signature share")]
-    InvalidSignatureShare(SignatureShare),
+    #[error("Invalid signature share from {0}")]
+    InvalidSignatureShare(PublicKey),
 
     #[error("Invalid threshold signature from {0}")]
     InvalidThresholdSignature(PublicKey),
