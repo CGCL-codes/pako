@@ -31,7 +31,7 @@ macro_rules! digest {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum Proof {
     // Relates to input for Phase1 (see PBPhase defined below).
-    Pi(Vec::<(bool, ViewNumber, threshold_crypto::Signature)>),
+    Pi(Vec<(bool, ViewNumber, threshold_crypto::Signature)>),
 
     // Relates to input for Phase2.
     // sigma1(left) for PB1 output and sigma2(right) for PB2 output.
@@ -82,6 +82,26 @@ pub struct Block {
 }
 
 impl Block {
+    pub async fn new(
+        payload: Vec<Digest>, 
+        author: PublicKey,
+        epoch: EpochNumber,
+        view: ViewNumber,
+        proof: Proof,
+        mut signature_service: SignatureService,
+    ) -> Self {
+        let block = Self {
+            payload,
+            author,
+            signature: Signature::default(),
+            epoch,
+            view,
+            proof,
+        };
+        let signature = signature_service.request_signature(block.digest()).await;
+        Self { signature, ..block }
+    }
+
     pub fn verify(&self, committee: &Committee) -> ConsensusResult<()> {
         // Ensure the authority has voting rights.
         let voting_rights = committee.stake(&self.author);
@@ -163,7 +183,9 @@ pub struct Echo {
     pub block_author: PublicKey,
     pub phase: PBPhase,
 
-    // Echo author.
+    // Echo info.
+    pub epoch: EpochNumber,
+    pub view: ViewNumber,
     pub author: PublicKey,
 
     // Signature share against block digest.
@@ -174,6 +196,8 @@ impl Echo {
     pub async fn new(block_digest: Digest, 
         block_author: PublicKey,
         phase: PBPhase, 
+        epoch: EpochNumber,
+        view: ViewNumber,
         author: PublicKey,
         mut signature_service: SignatureService
     ) -> Self {
@@ -182,11 +206,25 @@ impl Echo {
             block_digest,
             block_author,
             phase,
+            epoch,
+            view,
             author,
             signature_share,
         }
     }
-    pub fn verify(&self, committee: &Committee, pk_set: &PublicKeySet) -> ConsensusResult<()> {
+    pub fn verify(&self, committee: &Committee, pk_set: &PublicKeySet, leader: PublicKey) -> ConsensusResult<()> {
+        // Verify leader.
+        ensure!(
+            self.block_author == leader,
+            ConsensusError::WrongLeader {
+                digest: self.block_digest,
+                leader: self.block_author,
+                author: leader,
+                epoch: self.epoch,
+                view: self.view,
+            }
+        );
+
         // Ensure the authority has voting rights.
         ensure!(
             committee.stake(&self.author) > 0,
@@ -434,7 +472,7 @@ impl PreVote {
             PreVoteEnum::Yes(block) => {
                 ensure!(
                     block.check_sigma1(&pk_set.public_key()),
-                    ConsensusError::InvalidVoteProof(Some(block.proof))
+                    ConsensusError::InvalidVoteProof(block.proof)
                 )
             },
             PreVoteEnum::No(share) => {
@@ -493,7 +531,7 @@ impl Vote {
                 // Verify sigma1.
                 ensure!(
                     block.check_sigma1(&pk_set.public_key()),
-                    ConsensusError::InvalidVoteProof(Some(block.proof))
+                    ConsensusError::InvalidVoteProof(block.proof)
                 );
 
                 // Verify sig share.

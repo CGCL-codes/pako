@@ -1,4 +1,4 @@
-use crate::messages::{SeqNumber, ViewNumber, Proof};
+use crate::{messages::{SeqNumber, ViewNumber, Proof}, config::EpochNumber};
 use crypto::{CryptoError, Digest, PublicKey};
 use store::StoreError;
 use thiserror::Error;
@@ -30,6 +30,9 @@ pub enum ConsensusError {
     #[error("Serialization error: {0}")]
     SerializationError(#[from] Box<bincode::ErrorKind>),
 
+    #[error("Invalid digest to retrieve block.")]
+    DigestError,
+
     #[error("Store error: {0}")]
     StoreError(#[from] StoreError),
 
@@ -40,7 +43,7 @@ pub enum ConsensusError {
     InvalidEpochOrView(SeqNumber, ViewNumber),
 
     #[error("Invalid vote proof")]
-    InvalidVoteProof(Option<Proof>),
+    InvalidVoteProof(Proof),
 
     #[error("Invalid signature")]
     InvalidSignature(#[from] CryptoError),
@@ -81,10 +84,12 @@ pub enum ConsensusError {
     #[error("Malformed block {0}")]
     MalformedBlock(Digest),
 
-    #[error("Received block {digest} from leader {leader} at view {view}")]
+    #[error("Echo of block {digest} of leader {leader} received by {author} at epoch {epoch}, view {view}")]
     WrongLeader {
         digest: Digest,
         leader: PublicKey,
+        author: PublicKey,
+        epoch: EpochNumber,
         view: ViewNumber,
     },
 
