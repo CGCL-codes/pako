@@ -1,13 +1,12 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, BTreeMap};
 use std::rc::Rc;
-use std::sync::Mutex;
-use std::task::Waker;
-use std::{default, thread};
+use std::sync::{Arc, Mutex};
 
-use crate::{SeqNumber, ViewNumber};
 use crate::aggregator::Aggregator;
-use crate::config::{Committee, Parameters, EpochNumber};
+use crate::config::{Committee, Parameters, EpochNumber, ViewNumber};
+use crate::filter::FilterInput;
+use crate::mempool::MempoolDriver;
 use crate::synchrony::{DoneState, DoneFuture};
 use crate::error::{ConsensusError, ConsensusResult};
 use crate::messages::{Block, ConsensusMessage, PBPhase, Proof, Echo, Done, Finish, RandomnessShare, RandomCoin, PreVote, PreVoteEnum, VoteEnum, Vote};
@@ -15,10 +14,9 @@ use crypto::Hash as _;
 use crypto::{Digest, PublicKey, SignatureService};
 use ed25519_dalek::Digest as _;
 use ed25519_dalek::Sha512;
-use futures::lock;
 use log::debug;
 use serde::{Serialize, Deserialize};
-use threshold_crypto::{PublicKeySet, SecretKeyShare, PublicKeyShare, SignatureShare};
+use threshold_crypto::{PublicKeySet, SignatureShare};
 use tokio::sync::mpsc::{Receiver, Sender};
 use store::Store;
 
@@ -29,28 +27,46 @@ pub struct Core {
     store: Store,
     signature_service: SignatureService,
     pk_set: PublicKeySet,
-    pk_share: PublicKeyShare,
-    sk_share: SecretKeyShare,
     mempool_driver: MempoolDriver,
     core_channel: Receiver<ConsensusMessage>,
-    spb_channel: Receiver<ConsensusMessage>,
     network_filter: Sender<FilterInput>,
     commit_channel: Sender<Block>,
-    epoch: SeqNumber, //    // current epoch
-    view: ViewNumber,       // current view
     votes_aggregators: HashMap<Digest, Aggregator>, // n-f votes collector
     locks: HashMap<Digest, Block>,  // blocks received in current view with sigma1
-    random_coin: HashMap<Digest, RandomCoin>,
-    synchrony_states: HashMap<Digest, Rc<RefCell<DoneState>>>, // stores states of leader election and block delivery
-    abandon_channel: ,
+    random_coin: HashMap<Digest, RandomCoin>,   // random coins of each <epoch, view>
+    synchrony_states: HashMap<Digest, Arc<Mutex<DoneState>>>, // stores states of leader election and block delivery
 }
 
 impl Core {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-
+        name: PublicKey,
+        committee: Committee,
+        parameters: Parameters,
+        signature_service: SignatureService,
+        pk_set: PublicKeySet,
+        store: Store,
+        mempool_driver: MempoolDriver,
+        core_channel: Receiver<ConsensusMessage>,
+        network_filter: Sender<FilterInput>,
+        commit_channel: Sender<Block>,
     ) -> Self {
-
+        Self {
+            name,
+            committee,
+            parameters,
+            signature_service,
+            pk_set,
+            store,
+            mempool_driver,
+            network_filter,
+            commit_channel,
+            core_channel,
+            votes_aggregators: HashMap::new(),
+            locks: HashMap::new(),
+            random_coin: HashMap::new(),
+            synchrony_states: HashMap::new(),
+        }
     }
 
     // Get block by digest <epoch, view, author>.
@@ -58,10 +74,9 @@ impl Core {
         // Wait until block is stored.
         let store_state = self.synchrony_states
             .entry(digest.clone())
-            .or_insert(Rc::new(RefCell::new(DoneState { done: false, wakers: Vec::new() })));
-        let store_state = Rc::clone(store_state);
+            .or_insert(Arc::new(Mutex::new(DoneState { done: false, wakers: Vec::new() })));
         let store_fut = DoneFuture {
-            done_state: store_state,
+            done_state: Arc::clone(store_state),
         };
         store_fut.await;
 
@@ -83,17 +98,19 @@ impl Core {
         self.store.write(key, value).await;
 
         // Notify store futures undone.
-        let store_state = self.synchrony_states
+        let mut store_state = self.synchrony_states
             .entry(digest)
-            .or_insert(Rc::new(RefCell::new(DoneState { done: false, wakers: Vec::new() })));
-        store_state.borrow_mut().done = true;
-        while let Some(waker) = store_state.borrow_mut().wakers.pop() {
+            .or_insert(Arc::new(Mutex::new(DoneState { done: false, wakers: Vec::new() })))
+            .lock()
+            .unwrap();
+        store_state.done = true;
+        while let Some(waker) = store_state.wakers.pop() {
             waker.wake();
         }
     }
 
     // Generate a new block.
-    async fn generate_block(&self, epoch: EpochNumber, view: ViewNumber, proof: Proof) -> ConsensusResult<Block> {
+    async fn generate_block(&mut self, epoch: EpochNumber, view: ViewNumber, proof: Proof) -> ConsensusResult<Block> {
         // Make a new block.
         let payload = self
             .mempool_driver
@@ -123,10 +140,9 @@ impl Core {
         let digest = digest!(epoch.to_le_bytes(), view.to_le_bytes());
         let election_state = self.synchrony_states
             .entry(digest.clone())
-            .or_insert(Rc::new(RefCell::new(DoneState { done: false, wakers: Vec::new() })));
-        let election_state = Rc::clone(election_state);
+            .or_insert(Arc::new(Mutex::new(DoneState { done: false, wakers: Vec::new() })));
         let election_fut = DoneFuture {
-            done_state: election_state,
+            done_state: Arc::clone(election_state),
         };
         election_fut.await;
         Ok(self.random_coin.get(&digest).unwrap().leader)
@@ -134,14 +150,14 @@ impl Core {
 
     // TODO: implement check_value()
     fn check_value(&self, block: &Block) -> bool {
-        todo!()
+        true
     }
 
     // Value validation.
     fn value_validation(&self, block: &Block) -> bool {
         match block.proof {
             Proof::Pi(_) => self.check_value(block),
-            // Block should carry sigma1 though not explicitly matched.
+            // Block is supposed to carry sigma1 though not explicitly matched.
             Proof::Sigma(_, _) => block.check_sigma1(&self.pk_set.public_key()),
         }
     }
@@ -361,7 +377,8 @@ impl Core {
             Ok(None) => (),
             Ok(Some(_)) => {
                 // TODO: After collecting n-f Done, abandon the rest SPB instances.
-                self.abandon();
+                // This can be done by set a mutex-free bool flag indicating whether n-f done have been collected.
+                // In fact, the async/await strcuture of mvba protocol is sufficently fast to neglect actively abandoning.
             },
         }
 
@@ -445,15 +462,19 @@ impl Core {
         // Set ElectionState of <epoch, view> of done msg as `done`,
         // this wakes up the Waker of ElectionFuture of get_leader(),
         // then all calls of get_leader().await make progress.
-        let digest = digest!(random_coin.epoch.to_le_bytes(), random_coin.view.to_le_bytes());
-        let election_state = self.synchrony_states
-            .entry(digest)
-            .or_insert(Rc::new(RefCell::new(DoneState { done: false, wakers: Vec::new() })));
-        election_state.borrow_mut().done = true;
-        while let Some(waker) = election_state.borrow_mut().wakers.pop() {
-            waker.wake();
+        {
+            let digest = digest!(random_coin.epoch.to_le_bytes(), random_coin.view.to_le_bytes());
+            let mut election_state = self.synchrony_states
+                .entry(digest)
+                .or_insert(Arc::new(Mutex::new(DoneState { done: false, wakers: Vec::new() })))
+                .lock()
+                .unwrap();
+            election_state.done = true;
+            while let Some(waker) = election_state.wakers.pop() {
+                waker.wake();
+            }
         }
-
+        
         // Multicast the random coin.
         let message = ConsensusMessage::RandomCoin(random_coin.clone());
         self.transmit(message, None).await?;
@@ -507,8 +528,7 @@ impl Core {
                     view: random_coin.view,
                     leader: random_coin.leader,
                     body
-                }),
-            None).await
+                }), None).await
     }
 
     async fn handle_halt(&mut self, block: &Block) -> ConsensusResult<()> {
@@ -668,7 +688,7 @@ impl Core {
                     
                     // Broadcast the same block in new round, except updated pi and view.
                     let pair = (false, vote.view, quorum_for_null);
-                    let mut block = self.get_block(&digest!(vote.epoch.to_le_bytes(), vote.view.to_le_bytes(), vote.leader.0)).await?;
+                    let mut block = self.get_block(&digest!(vote.epoch.to_le_bytes(), vote.view.to_le_bytes(), self.name.0)).await?;
                     if let Proof::Pi(pi) = &mut block.proof {
                         pi.push(pair);
                     }
@@ -689,7 +709,8 @@ impl Core {
                                 _ => None,
                             }
                         }).unwrap();
-
+                    
+                    // Broadcast the leader's block in next round.
                     let pi = (true, vote.view, sigma1.as_ref().unwrap().clone());
                     let mut block = self.get_block(&digest!(vote.epoch.to_le_bytes(), vote.view.to_le_bytes(), vote.leader.0)).await?;
                     block.proof = Proof::Pi(vec![pi]);
@@ -731,6 +752,11 @@ impl Core {
                     }
                 }
             };
+
+            match result {
+                Ok(_) => todo!(),
+                Err(_) => todo!(),
+            }
 
             // TODO: Match result and capture errors.
             todo!()

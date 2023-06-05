@@ -1,12 +1,8 @@
-use crate::{SeqNumber, ViewNumber};
-use crate::config::{Committee, Stake, EpochNumber};
+use crate::config::{Committee, Stake};
 use crate::error::{ConsensusError, ConsensusResult};
 use crate::messages::ConsensusMessage;
-use crypto::Hash as _;
-use crypto::{Digest, PublicKey, Signature};
-use threshold_crypto::PublicKeyShare;
-use std::collections::{HashMap, HashSet};
-// use std::convert::TryInto;
+use crypto::PublicKey;
+use std::collections::HashSet;
 
 #[cfg(test)]
 #[path = "tests/aggregator_tests.rs"]

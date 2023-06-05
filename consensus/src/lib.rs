@@ -18,6 +18,6 @@ mod common;
 
 pub use crate::config::{Committee, Parameters};
 pub use crate::consensus::{Consensus};
-pub use crate::messages::{ConsensusMessage, SeqNumber, ViewNumber};
+pub use crate::messages::{ConsensusMessage};
 pub use crate::error::ConsensusError;
 pub use crate::mempool::{ConsensusMempoolMessage, PayloadStatus};

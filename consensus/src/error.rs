@@ -1,4 +1,4 @@
-use crate::{messages::{SeqNumber, ViewNumber, Proof}, config::EpochNumber};
+use crate::{messages::Proof, config::{EpochNumber, ViewNumber}};
 use crypto::{CryptoError, Digest, PublicKey};
 use store::StoreError;
 use thiserror::Error;
@@ -40,7 +40,7 @@ pub enum ConsensusError {
     NotInCommittee(PublicKey),
 
     #[error("Invalid epoch {0} or view {1}")]
-    InvalidEpochOrView(SeqNumber, ViewNumber),
+    InvalidEpochOrView(EpochNumber, ViewNumber),
 
     #[error("Invalid vote proof")]
     InvalidVoteProof(Proof),
@@ -95,11 +95,4 @@ pub enum ConsensusError {
 
     #[error("Invalid payload")]
     InvalidPayload,
-
-    #[error("Block rounds not consecutive! rounds {rd1}, {rd2} and {rd3}")]
-    NonConsecutiveRounds {
-        rd1: SeqNumber,
-        rd2: SeqNumber,
-        rd3: SeqNumber,
-    },
 }

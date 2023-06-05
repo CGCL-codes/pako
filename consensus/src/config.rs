@@ -6,6 +6,7 @@ use std::net::SocketAddr;
 
 pub type Stake = u32;
 pub type EpochNumber = u128;
+pub type ViewNumber = u8;
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Parameters {

@@ -1,12 +1,9 @@
-use crate::config::{Committee, Parameters, Protocol};
-use crate::fallback::Fallback;
-use crate::core::{ConsensusMessage, Core};
+use crate::config::{Committee, Parameters};
+use crate::core::Core;
 use crate::error::ConsensusResult;
 use crate::filter::Filter;
-use crate::leader::LeaderElector;
 use crate::mempool::{ConsensusMempoolMessage, MempoolDriver};
-use crate::messages::Block;
-use crate::synchronizer::Synchronizer;
+use crate::messages::{Block, ConsensusMessage};
 use crypto::{PublicKey, SignatureService};
 use log::info;
 use network::{NetReceiver, NetSender};
@@ -34,7 +31,6 @@ impl Consensus {
         rx_core: Receiver<ConsensusMessage>,
         tx_consensus_mempool: Sender<ConsensusMempoolMessage>,
         tx_commit: Sender<Block>,
-        protocol: Protocol,
     ) -> ConsensusResult<()> {
         info!(
             "Consensus timeout delay set to {} ms",
@@ -71,90 +67,28 @@ impl Consensus {
             network_sender.run().await;
         });
 
-        // The leader elector algorithm.
-        let leader_elector = LeaderElector::new(committee.clone());
-
         // Make the mempool driver which will mediate our requests to the mempool.
         let mempool_driver = MempoolDriver::new(tx_consensus_mempool);
 
         // Custom filter to arbitrary delay network messages.
         Filter::run(rx_filter, tx_network, parameters.clone());
 
-        // Make the synchronizer. This instance runs in a background thread
-        // and asks other nodes for any block that we may be missing.
-        let synchronizer = Synchronizer::new(
-            name,
-            committee.clone(),
-            store.clone(),
-            /* network_filter */ tx_filter.clone(),
-            /* core_channel */ tx_core,
-            parameters.sync_retry_delay,
-        )
-        .await;
-
-        match protocol {
-            Protocol::HotStuff => {  // Run HotStuff
-                let mut core = Core::new(
-                    name,
-                    committee,
-                    parameters,
-                    signature_service,
-                    store,
-                    leader_elector,
-                    mempool_driver,
-                    synchronizer,
-                    /* core_channel */ rx_core,
-                    /* network_filter */ tx_filter,
-                    /* commit_channel */ tx_commit,
-                );
-                tokio::spawn(async move {
-                    core.run().await;
-                });
-            },
-            Protocol::AsyncHotStuff => {  // Run AsyncHotStuff
-                let mut hotstuff_with_fallback = Fallback::new(
-                    name,
-                    committee,
-                    parameters,
-                    signature_service,
-                    pk_set,
-                    store,
-                    leader_elector,
-                    mempool_driver,
-                    synchronizer,
-                    /* core_channel */ rx_core,
-                    /* network_filter */ tx_filter,
-                    /* commit_channel */ tx_commit,
-                    false,
-                );
-                tokio::spawn(async move {
-                    hotstuff_with_fallback.run().await;
-                });
-            },
-            Protocol::TwoChainVABA => {  // Run TwoChainVABA, which is just fallback with timeout=0, i.e., immediately send timeout after exiting a fallback
-                let mut vaba = Fallback::new(
-                    name,
-                    committee,
-                    parameters,
-                    signature_service,
-                    pk_set,
-                    store,
-                    leader_elector,
-                    mempool_driver,
-                    synchronizer,
-                    /* core_channel */ rx_core,
-                    /* network_filter */ tx_filter,
-                    /* commit_channel */ tx_commit,
-                    true, // running vaba
-                );
-                tokio::spawn(async move {
-                    vaba.run().await;
-                });
-            },
-            _ => {  
-                return Ok(());
-            },
-        }
+        tokio::spawn(async move {
+            let mut mvba = Core::new(
+                name,
+                committee,
+                parameters,
+                signature_service,
+                pk_set,
+                store,
+                mempool_driver,
+                /* core_channel */ rx_core,
+                /* network_filter */ tx_filter,
+                /* commit_channel */ tx_commit,
+            );
+            
+            mvba.run().await;
+        });
     
         Ok(())
     }

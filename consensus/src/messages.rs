@@ -1,18 +1,13 @@
-use crate::Consensus;
-use crate::config::{Committee, EpochNumber};
+use crate::config::{Committee, EpochNumber, ViewNumber};
 use crate::error::{ConsensusError, ConsensusResult};
 use crypto::{Digest, Signature, SignatureService, Hash, PublicKey};
 use ed25519_dalek::Digest as _;
 use ed25519_dalek::Sha512;
 use serde::{Deserialize, Serialize};
-use std::borrow::Borrow;
 use std::collections::{HashSet, BTreeMap};
 use std::convert::TryInto;
-use std::{fmt, hash};
-use threshold_crypto::{SignatureShare, PublicKeySet, PublicKeyShare};
-
-pub type SeqNumber = u128;
-pub type ViewNumber = u8;
+use std::fmt;
+use threshold_crypto::{SignatureShare, PublicKeySet};
 
 #[macro_export]
 macro_rules! digest {
@@ -74,7 +69,7 @@ pub struct Block {
     pub payload: Vec<Digest>,
     pub author: PublicKey,
     pub signature: Signature,
-    pub epoch: SeqNumber,
+    pub epoch: EpochNumber,
     pub view: ViewNumber,
 
     // According to proof, we can tell which PBPhase this block is currently in.
@@ -325,7 +320,7 @@ impl Hash for Done {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct RandomnessShare {
-    pub epoch: SeqNumber, // eopch
+    pub epoch: EpochNumber, // eopch
     pub view: ViewNumber, // view
     pub author: PublicKey,
     pub signature_share: SignatureShare,
@@ -333,7 +328,7 @@ pub struct RandomnessShare {
 
 impl RandomnessShare {
     pub async fn new(
-        epoch: SeqNumber,
+        epoch: EpochNumber,
         view: ViewNumber,
         author: PublicKey,
         mut signature_service: SignatureService,
@@ -383,7 +378,7 @@ impl fmt::Debug for RandomnessShare {
 
 #[derive(Clone, Serialize, Deserialize, Default)]
 pub struct RandomCoin {
-    pub epoch: SeqNumber, // epoch
+    pub epoch: EpochNumber, // epoch
     pub view: ViewNumber, // view
     pub leader: PublicKey,  // elected leader of the view
     pub shares: Vec<RandomnessShare>,
@@ -473,7 +468,8 @@ impl PreVote {
                 ensure!(
                     block.check_sigma1(&pk_set.public_key()),
                     ConsensusError::InvalidVoteProof(block.proof)
-                )
+                );
+                Ok(())
             },
             PreVoteEnum::No(share) => {
                 let pk_share = pk_set.public_key_share(committee.id(self.author));
@@ -483,7 +479,8 @@ impl PreVote {
                 ensure!(
                     pk_share.verify(&share, self.digest()),
                     ConsensusError::InvalidSignatureShare(self.author)
-                )
+                );
+                Ok(())
             },
         }
     }
@@ -539,7 +536,9 @@ impl Vote {
                 ensure!(
                     pk_share.verify(&share, block.digest()),
                     ConsensusError::InvalidSignatureShare(self.author)
-                )
+                );
+
+                Ok(())
             },
             VoteEnum::No(sig, share) => {
                 // Verify threshold signature from n-f `No` PreVotes.
@@ -559,7 +558,9 @@ impl Vote {
                 ensure!(
                     pk_share.verify(&share, self.digest()),
                     ConsensusError::InvalidSignatureShare(self.author)
-                )
+                );
+
+                Ok(())
             },
         }
     }

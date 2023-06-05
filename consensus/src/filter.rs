@@ -1,5 +1,5 @@
 use crate::config::Parameters;
-use crate::core::ConsensusMessage;
+use crate::messages::ConsensusMessage;
 use bytes::Bytes;
 use futures::stream::futures_unordered::FuturesUnordered;
 use futures::stream::StreamExt as _;

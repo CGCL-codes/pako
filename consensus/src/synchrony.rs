@@ -1,4 +1,4 @@
-use std::{task::{Waker, Poll, Context}, rc::Rc, pin::Pin, cell::RefCell};
+use std::{task::{Waker, Poll, Context}, pin::Pin, sync::{Mutex, Arc}};
 
 use futures::Future;
 
@@ -8,17 +8,18 @@ pub struct DoneState {
 }
 
 pub struct DoneFuture {
-    done_state: Rc<RefCell<DoneState>>,
+    done_state: Arc<Mutex<DoneState>>,
 }
 
 impl Future for DoneFuture {
     type Output = ();
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        if self.done_state.borrow().done {
+        let mut done_state = self.done_state.lock().unwrap();
+        if done_state.done {
             Poll::Ready(())
         } else {
-            self.done_state.borrow_mut().wakers.push(cx.waker().clone());
+            done_state.wakers.push(cx.waker().clone());
             Poll::Pending
         }
     }
