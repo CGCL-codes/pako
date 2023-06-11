@@ -58,14 +58,15 @@ impl Synchronizer {
 
                             let block_digest = block.digest();
                             let author = block.author;
-                            let round = block.round;
+                            let epoch = block.epoch;
+                            let view = block.view;
                             if pending.contains_key(&block_digest) {
                                 continue;
                             }
 
                             let wait_for = missing.iter().cloned().map(|x| (x, store_copy.clone())).collect();
                             let (tx_cancel, rx_cancel) = channel(1);
-                            pending.insert(block_digest, (round, tx_cancel));
+                            pending.insert(block_digest, (epoch, view, tx_cancel));
                             let fut = Self::waiter(wait_for, block, rx_cancel);
                             waiting.push(fut);
 
@@ -79,7 +80,7 @@ impl Synchronizer {
                                     .expect("Failed to measure time")
                                     .as_millis();
                                 for x in &missing {
-                                    requests.insert(x.clone(), (round, now));
+                                    requests.insert(x.clone(), (epoch, now));
                                 }
 
                                 let message = MempoolMessage::PayloadRequest(missing.clone(), name);

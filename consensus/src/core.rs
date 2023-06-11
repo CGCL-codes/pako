@@ -1,6 +1,4 @@
-use std::cell::RefCell;
 use std::collections::{HashMap, BTreeMap};
-use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 use crate::aggregator::Aggregator;
@@ -9,7 +7,7 @@ use crate::filter::FilterInput;
 use crate::mempool::MempoolDriver;
 use crate::synchrony::{DoneState, DoneFuture};
 use crate::error::{ConsensusError, ConsensusResult};
-use crate::messages::{Block, ConsensusMessage, PBPhase, Proof, Echo, Done, Finish, RandomnessShare, RandomCoin, PreVote, PreVoteEnum, VoteEnum, Vote};
+use crate::messages::*;
 use crypto::Hash as _;
 use crypto::{Digest, PublicKey, SignatureService};
 use ed25519_dalek::Digest as _;
@@ -302,6 +300,16 @@ impl Core {
             ConsensusError::InvalidVoteProof(block.proof.clone())
         );
 
+        // Let's see if we have the block's data. If we don't, the mempool
+        // will get it and then make us resume processing this block.
+        if self.mempool_driver.verify(block.clone()).await? {
+            return Ok(());
+        }
+
+        self.process_block(block).await
+    }
+
+    async fn process_block(&mut self, block: &Block) -> ConsensusResult<()> {
         let phase = match &block.proof {
             Proof::Pi(pi) => {
                 PBPhase::Phase1
@@ -724,12 +732,17 @@ impl Core {
     }
 
     // TODO: Implement Output function.
-    async fn output(&self, block: Block) -> ConsensusResult<()> {
-        todo!()
+    async fn output(&mut self, block: Block) -> ConsensusResult<()> {
+        debug!("Commit block {} ", block);
+
+        // Clean up mempool.
+        self.mempool_driver.cleanup_async(&block).await;
+
+        Ok(())
     }
 
     pub async fn run(&mut self) {
-        // Upon booting, generate the very first block (if we are the sender).
+        // Upon booting, generate the very first block.
         let block = self.generate_block(1, 1, Proof::Pi(Vec::new()))
             .await
             .expect("Failed to generate the first block.");

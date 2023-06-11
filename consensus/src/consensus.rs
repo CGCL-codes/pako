@@ -73,20 +73,20 @@ impl Consensus {
         // Custom filter to arbitrary delay network messages.
         Filter::run(rx_filter, tx_network, parameters.clone());
 
+        let mut mvba = Core::new(
+            name,
+            committee,
+            parameters,
+            signature_service,
+            pk_set,
+            store,
+            mempool_driver,
+            /* core_channel */ rx_core,
+            /* network_filter */ tx_filter,
+            /* commit_channel */ tx_commit,
+        );
+
         tokio::spawn(async move {
-            let mut mvba = Core::new(
-                name,
-                committee,
-                parameters,
-                signature_service,
-                pk_set,
-                store,
-                mempool_driver,
-                /* core_channel */ rx_core,
-                /* network_filter */ tx_filter,
-                /* commit_channel */ tx_commit,
-            );
-            
             mvba.run().await;
         });
     
