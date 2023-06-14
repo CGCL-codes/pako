@@ -5,7 +5,7 @@ use crate::aggregator::Aggregator;
 use crate::config::{Committee, Parameters, EpochNumber, ViewNumber};
 use crate::filter::FilterInput;
 use crate::mempool::MempoolDriver;
-use crate::synchrony::{DoneState, DoneFuture};
+use crate::synchronizer::{DoneState, DoneFuture};
 use crate::error::{ConsensusError, ConsensusResult};
 use crate::messages::*;
 use crypto::Hash as _;

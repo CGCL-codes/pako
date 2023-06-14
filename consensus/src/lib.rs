@@ -9,7 +9,7 @@ mod config;
 mod consensus;
 mod core;
 mod filter;
-mod synchrony;
+mod synchronizer;
 mod mempool;
 
 #[cfg(test)]
