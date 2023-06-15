@@ -1,3 +1,4 @@
+use crate::config::{EpochNumber, ViewNumber};
 use crate::error::{ConsensusError, ConsensusResult};
 use crate::messages::Block;
 use crypto::Digest;
@@ -15,7 +16,7 @@ pub enum PayloadStatus {
 pub enum ConsensusMempoolMessage {
     Get(usize, oneshot::Sender<Vec<Digest>>),
     Verify(Box<Block>, oneshot::Sender<PayloadStatus>),
-    Cleanup(Vec<Digest>, SeqNumber),
+    Cleanup(Vec<Digest>, EpochNumber, ViewNumber),
 }
 
 pub struct MempoolDriver {
@@ -62,7 +63,7 @@ impl MempoolDriver {
             .iter()
             .cloned()
             .collect();
-        let message = ConsensusMempoolMessage::Cleanup(digests, block.round);
+        let message = ConsensusMempoolMessage::Cleanup(digests, block.epoch, block.view);
         self.mempool_channel
             .send(message)
             .await

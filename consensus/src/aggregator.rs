@@ -29,7 +29,7 @@ impl Aggregator {
             self.used.insert(author),
             ConsensusError::AuthorityReuseinQC(author)
         );
-        self.votes.push(vote);
+        self.votes.push(vote.clone());
         self.weight += committee.stake(&author);
 
         let threshold = match vote {
@@ -38,7 +38,7 @@ impl Aggregator {
         };
         if self.weight >= threshold {
             self.weight = 0; // Ensures QC is only made once.
-            return Ok(Some(self.votes));
+            return Ok(Some(self.votes.clone()));
         }
         Ok(None)
     }

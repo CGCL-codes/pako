@@ -5,15 +5,14 @@ use crate::aggregator::Aggregator;
 use crate::config::{Committee, Parameters, EpochNumber, ViewNumber};
 use crate::filter::FilterInput;
 use crate::mempool::MempoolDriver;
-use crate::synchronizer::{DoneState, DoneFuture};
+use crate::synchronizer::{DoneState, DoneFuture, Synchronizer};
 use crate::error::{ConsensusError, ConsensusResult};
 use crate::messages::*;
 use crypto::Hash as _;
 use crypto::{Digest, PublicKey, SignatureService};
 use ed25519_dalek::Digest as _;
 use ed25519_dalek::Sha512;
-use log::debug;
-use serde::{Serialize, Deserialize};
+use log::{debug, warn, error};
 use threshold_crypto::{PublicKeySet, SignatureShare};
 use tokio::sync::mpsc::{Receiver, Sender};
 use store::Store;
@@ -28,6 +27,7 @@ pub struct Core {
     mempool_driver: MempoolDriver,
     core_channel: Receiver<ConsensusMessage>,
     network_filter: Sender<FilterInput>,
+    synchronizer: Synchronizer,
     commit_channel: Sender<Block>,
     votes_aggregators: HashMap<Digest, Aggregator>, // n-f votes collector
     locks: HashMap<Digest, Block>,  // blocks received in current view with sigma1
@@ -45,6 +45,7 @@ impl Core {
         pk_set: PublicKeySet,
         store: Store,
         mempool_driver: MempoolDriver,
+        synchronizer: Synchronizer,
         core_channel: Receiver<ConsensusMessage>,
         network_filter: Sender<FilterInput>,
         commit_channel: Sender<Block>,
@@ -58,6 +59,7 @@ impl Core {
             store,
             mempool_driver,
             network_filter,
+            synchronizer,
             commit_channel,
             core_channel,
             votes_aggregators: HashMap::new(),
@@ -161,17 +163,13 @@ impl Core {
     }
 
     async fn transmit(&self, message: ConsensusMessage, to: Option<&PublicKey>) -> ConsensusResult<()> {
-        let addresses = if let Some(to) = to {
-            debug!("Sending {:?} to {}", message, to);
-            vec![self.committee.address(to)?]
-        } else {
-            debug!("Broadcasting {:?}", message);
-            self.committee.broadcast_addresses(&self.name)
-        };
-        if let Err(e) = self.network_filter.send((message, addresses)).await {
-            panic!("Failed to send message through network channel: {}", e);
-        }
-        Ok(())
+        Synchronizer::transmit(
+            message,
+            &self.name,
+            to,
+            &self.network_filter,
+            &self.committee,
+        ).await
     }
 
     async fn pb(&self, block: &Block) -> ConsensusResult<()> {
@@ -241,9 +239,13 @@ impl Core {
                     },
                     PBPhase::Phase2 => {
                         // Finish SPB and broadcast FINISH.
-                        let Proof::Sigma(sigma1, _) = block.proof;
-                        block.proof = Proof::Sigma(sigma1, Some(threshold_signature));
-                        self.finish(&block).await
+                        if let Proof::Sigma(sigma1, _) = block.proof {
+                            block.proof = Proof::Sigma(sigma1, Some(threshold_signature));
+                            self.finish(&block).await?;
+                        } else {
+                            return Err(ConsensusError::InvalidThresholdSignature(block.author));
+                        }
+                        Ok(())
                     }
                 }
             },
@@ -300,18 +302,8 @@ impl Core {
             ConsensusError::InvalidVoteProof(block.proof.clone())
         );
 
-        // Let's see if we have the block's data. If we don't, the mempool
-        // will get it and then make us resume processing this block.
-        if self.mempool_driver.verify(block.clone()).await? {
-            return Ok(());
-        }
-
-        self.process_block(block).await
-    }
-
-    async fn process_block(&mut self, block: &Block) -> ConsensusResult<()> {
         let phase = match &block.proof {
-            Proof::Pi(pi) => {
+            Proof::Pi(_) => {
                 PBPhase::Phase1
             },
             Proof::Sigma(_, _) => {
@@ -400,7 +392,7 @@ impl Core {
                     self.signature_service.clone()
                 ).await;
                 let message = ConsensusMessage::RandomnessShare(randomness_share.clone());
-                self.transmit(message, None).await;
+                self.transmit(message, None).await?;
             }
         }
 
@@ -408,7 +400,7 @@ impl Core {
     }
 
     async fn handle_randommess_share(&mut self, randomness_share: &RandomnessShare) -> ConsensusResult<()> {
-        randomness_share.verify(&self.committee, &self.pk_set);
+        randomness_share.verify(&self.committee, &self.pk_set)?;
 
         // f+1 shares to form a random coin.
         let shares = self.votes_aggregators
@@ -507,7 +499,7 @@ impl Core {
             self.transmit(halt, None).await?;
 
             // Terminate and start a new epoch.
-            self.output(leader_finish.block.clone());
+            self.output(leader_finish.block.clone()).await?;
             let new_block = self.generate_block(random_coin.epoch + 1, random_coin.view + 1, Proof::Pi(Vec::new())).await?;
             self.spb(new_block).await?;
         }
@@ -546,7 +538,7 @@ impl Core {
             // Broadcast halt and output
             let halt = ConsensusMessage::Halt(block.clone());
             self.transmit(halt, None).await?;
-            self.output(block.clone());
+            self.output(block.clone()).await?;
 
             // Propose next block.
             let new_block = self.generate_block(block.epoch+1, block.view+1, Proof::Pi(Vec::new())).await?;
@@ -676,7 +668,7 @@ impl Core {
                             let mut completed_block = block.clone();
                             completed_block.proof = Proof::Sigma(sigma1.clone(), Some(sigma2));
                             self.transmit(ConsensusMessage::Halt(completed_block.clone()), None).await?;
-                            self.output(completed_block);
+                            self.output(completed_block).await?;
                             
                             // Propose next block.
                             let new_block = self.generate_block(block.epoch+1, block.view+1, Proof::Pi(Vec::new())).await?;
@@ -731,9 +723,34 @@ impl Core {
         }
     }
 
-    // TODO: Implement Output function.
+    async fn handle_sync_request(
+        &mut self,
+        digest: Digest,
+        sender: PublicKey,
+    ) -> ConsensusResult<()> {
+        if let Some(bytes) = self.store.read(digest.to_vec()).await? {
+            let block = bincode::deserialize(&bytes)?;
+            let message = ConsensusMessage::Val(block);
+            self.transmit(message, Some(&sender)).await?;
+        }
+        Ok(())
+    }
+
     async fn output(&mut self, block: Block) -> ConsensusResult<()> {
-        debug!("Commit block {} ", block);
+        debug!("Commit block {:?} ", block);
+
+        // Output.
+        if let Err(e) = self.commit_channel.send(block.clone()).await {
+            warn!("Failed to send block through the commit channel: {}", e);
+        }
+
+        // Let's see if we have the block's data. If we don't, the mempool will get it.
+        if !self.mempool_driver.verify(block.clone()).await? {
+            if let Err(e) = self.synchronizer.inner_channel.send(block.clone()).await {
+                panic!("Failed to send request to synchronizer: {}", e);
+            }
+            return Ok(());
+        }
 
         // Clean up mempool.
         self.mempool_driver.cleanup_async(&block).await;
@@ -746,6 +763,7 @@ impl Core {
         let block = self.generate_block(1, 1, Proof::Pi(Vec::new()))
             .await
             .expect("Failed to generate the first block.");
+        self.spb(block).await.expect("Failed to broadcast the first block.");
 
         loop {
             let result = tokio::select! {
@@ -755,24 +773,22 @@ impl Core {
                         ConsensusMessage::Echo(echo) => self.handle_echo(&echo).await,
                         ConsensusMessage::Finish(finish) => self.handle_finish(&finish).await,
                         ConsensusMessage::Halt(block) => self.handle_halt(&block).await,
-                        ConsensusMessage::Propose(_) => todo!(),
-                        ConsensusMessage::Lock(_) => todo!(),
                         ConsensusMessage::Done(done) => self.handle_done(&done).await,
                         ConsensusMessage::RandomnessShare(randomness_share) => self.handle_randommess_share(&randomness_share).await,
                         ConsensusMessage::RandomCoin(coin) => self.handle_random_coin(coin).await,
                         ConsensusMessage::PreVote(prevote) => self.handle_prevote(&prevote).await,
                         ConsensusMessage::Vote(vote) => self.handle_vote(vote).await,
+                        ConsensusMessage::SyncRequest(digest, name) => self.handle_sync_request(digest, name).await,
                     }
                 }
             };
 
             match result {
-                Ok(_) => todo!(),
-                Err(_) => todo!(),
+                Ok(()) => (),
+                Err(ConsensusError::StoreError(e)) => error!("{}", e),
+                Err(ConsensusError::SerializationError(e)) => error!("Store corrupted. {}", e),
+                Err(e) => warn!("{}", e),
             }
-
-            // TODO: Match result and capture errors.
-            todo!()
         }
     }
 }

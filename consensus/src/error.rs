@@ -2,7 +2,6 @@ use crate::{messages::Proof, config::{EpochNumber, ViewNumber}};
 use crypto::{CryptoError, Digest, PublicKey};
 use store::StoreError;
 use thiserror::Error;
-use threshold_crypto::{PublicKeyShare, SignatureShare};
 
 #[macro_export]
 macro_rules! bail {

@@ -51,10 +51,8 @@ impl AsRef<[u8]> for PBPhase {
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum ConsensusMessage {
-    Propose(Block),
     Val(Block),
     Echo(Echo),
-    Lock(Lock),
     Finish(Finish),
     Done(Done),
     Halt(Block),    // Need to compare leader of round <epoch, view> with the block leader.
@@ -62,6 +60,7 @@ pub enum ConsensusMessage {
     RandomCoin(RandomCoin),
     PreVote(PreVote),
     Vote(Vote),
+    SyncRequest(Digest, PublicKey),
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -112,14 +111,14 @@ impl Block {
     }
 
     pub fn check_sigma1(&self, pk: &threshold_crypto::PublicKey) -> bool {
-        if let Proof::Sigma(Some(sigma1), _) = self.proof {
+        if let Proof::Sigma(Some(sigma1), _) = &self.proof {
             return pk.verify(&sigma1, self.digest())
         }
         false
     }
 
     pub fn check_sigma2(&self, pk: &threshold_crypto::PublicKey) -> bool {
-        if let Proof::Sigma(_, Some(sigma2)) = self.proof {
+        if let Proof::Sigma(_, Some(sigma2)) = &self.proof {
             return pk.verify(&sigma2, self.digest())
         }
         false
@@ -212,7 +211,7 @@ impl Echo {
         ensure!(
             self.block_author == leader,
             ConsensusError::WrongLeader {
-                digest: self.block_digest,
+                digest: self.block_digest.clone(),
                 leader: self.block_author,
                 author: leader,
                 epoch: self.epoch,
@@ -239,16 +238,18 @@ impl Echo {
 
 impl fmt::Debug for Echo {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
-        // write!(
-        //     f, 
-        //     "Echo(author {}, block_author {}, epoch {}, view {}, phase {})", 
-        //     self.author,
-        //     self.block_author,
-        //     self.epoch,
-        //     self.view,
-        //     self.phase,
-        // )
-        todo!()
+        write!(
+            f, 
+            "Echo(author {}, block_author {}, epoch {}, view {}, phase {})", 
+            self.author,
+            self.block_author,
+            self.epoch,
+            self.view,
+            match self.phase {
+                PBPhase::Phase1 => "1",
+                PBPhase::Phase2 => "2",
+            },
+        )
     }
 }
 
@@ -256,7 +257,7 @@ impl Hash for Echo {
     fn digest(&self) -> Digest {
         // Echo is distinguished by <epoch, view, phase, ECHO>,
         // which can be implemented by <block_digest, ECHO>.
-        digest!(self.block_digest, "ECHO")
+        digest!(self.block_digest.clone(), "ECHO")
     }
 }
 
@@ -268,19 +269,6 @@ pub struct Lock {
 
     // Threshold signature combined by PB leader.
     pub signature: threshold_crypto::Signature,
-}
-
-impl fmt::Debug for Lock{
-    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
-        todo!()
-    }
-}
-
-impl Hash for Lock {
-    fn digest(&self) -> Digest {
-        let mut hasher = Sha512::new();
-        todo!()
-    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -315,6 +303,12 @@ impl Hash for Done {
             self.view.to_le_bytes(),
             "DONE"
         )
+    }
+}
+
+impl fmt::Debug for Done {
+    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
+        write!(f, "Done (author {}, epoch {}, view {})", self.author, self.epoch, self.view)
     }
 }
 
@@ -463,11 +457,11 @@ pub enum PreVoteEnum {
 
 impl PreVote {
     pub fn verify(&self, committee: &Committee, pk_set: &PublicKeySet) -> ConsensusResult<()> {
-        match self.body {
+        match &self.body {
             PreVoteEnum::Yes(block) => {
                 ensure!(
                     block.check_sigma1(&pk_set.public_key()),
-                    ConsensusError::InvalidVoteProof(block.proof)
+                    ConsensusError::InvalidVoteProof(block.proof.clone())
                 );
                 Ok(())
             },
@@ -493,6 +487,21 @@ impl Hash for PreVote {
             self.view.to_le_bytes(),
             self.author.0,
             "PREVOTE"
+        )
+    }
+}
+
+impl fmt::Debug for PreVote {
+    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
+        write!(f, "PreVote (author {}, epoch {}, view {}, leader {}, body {})", 
+            self.author,
+            self.epoch,
+            self.view, 
+            self.leader,
+            match self.body {
+                PreVoteEnum::Yes(_) => "YES",
+                PreVoteEnum::No(_) => "NO",
+            }
         )
     }
 }
@@ -523,12 +532,12 @@ pub enum VoteEnum {
 
 impl Vote {
     pub fn verify(&self, committee: &Committee, pk_set: &PublicKeySet) -> ConsensusResult<()> {
-        match self.body {
+        match &self.body {
             VoteEnum::Yes(block, share) => {
                 // Verify sigma1.
                 ensure!(
                     block.check_sigma1(&pk_set.public_key()),
-                    ConsensusError::InvalidVoteProof(block.proof)
+                    ConsensusError::InvalidVoteProof(block.proof.clone())
                 );
 
                 // Verify sig share.
@@ -573,6 +582,21 @@ impl Hash for Vote {
             self.view.to_le_bytes(),
             self.author.0,
             "VOTE"
+        )
+    }
+}
+
+impl fmt::Debug for Vote {
+    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
+        write!(f, "PreVote (author {}, epoch {}, view {}, leader {}, body {})", 
+            self.author,
+            self.epoch,
+            self.view, 
+            self.leader,
+            match self.body {
+                VoteEnum::Yes(_, _) => "YES",
+                VoteEnum::No(_, _) => "NO",
+            }
         )
     }
 }

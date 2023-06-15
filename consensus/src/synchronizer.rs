@@ -1,9 +1,12 @@
 use crate::config::Committee;
 use crate::messages::{Block, ConsensusMessage};
-use crate::error::ConsensusResult;
+use crate::error::{ConsensusError, ConsensusResult};
 use crate::filter::FilterInput;
 use crypto::Hash as _;
 use crypto::{Digest, PublicKey};
+use ed25519_dalek::Digest as _;
+use ed25519_dalek::Sha512;
+use futures::future::try_join_all;
 use futures::stream::futures_unordered::FuturesUnordered;
 use futures::stream::StreamExt as _;
 use futures::Future;
@@ -27,7 +30,7 @@ pub struct DoneState {
 }
 
 pub struct DoneFuture {
-    done_state: Arc<Mutex<DoneState>>,
+    pub done_state: Arc<Mutex<DoneState>>,
 }
 
 impl Future for DoneFuture {
@@ -46,7 +49,7 @@ impl Future for DoneFuture {
 
 pub struct Synchronizer {
     store: Store,
-    inner_channel: Sender<Block>,
+    pub inner_channel: Sender<Block>,
 }
 
 impl Synchronizer {
@@ -55,7 +58,6 @@ impl Synchronizer {
         committee: Committee,
         store: Store,
         network_filter: Sender<FilterInput>,
-        core_channel: Sender<ConsensusMessage>,
         sync_retry_delay: u64,
     ) -> Self {
         let (tx_inner, mut rx_inner): (_, Receiver<Block>) = channel(10000);
@@ -72,19 +74,16 @@ impl Synchronizer {
                 tokio::select! {
                     Some(block) = rx_inner.recv() => {
                         if pending.insert(block.digest()) {
-                            let parent = block.parent().clone();
-                            let fut = Self::waiter(store_copy.clone(), parent.clone(), block);
+                            let fut = Self::waiter(store_copy.clone(), block.clone());
                             waiting.push(fut);
 
-                            if !requests.contains_key(&parent){
-                                debug!("Requesting sync for block {}", parent);
+                            if !requests.contains_key(&block.digest()){
+                                debug!("Requesting sync for block {}", block.digest());
                                 let now = SystemTime::now()
                                     .duration_since(UNIX_EPOCH)
                                     .expect("Failed to measure time")
                                     .as_millis();
-                                requests.insert(parent.clone(), now);
-                                let message = ConsensusMessage::SyncRequest(parent, name);
-                                Self::transmit(message, &name, None, &network_filter, &committee).await.unwrap();
+                                requests.insert(block.digest(), now);
                             }
                         }
                     },
@@ -92,11 +91,11 @@ impl Synchronizer {
                         Ok(block) => {
                             debug!("consensus sync loopback");
                             let _ = pending.remove(&block.digest());
-                            let _ = requests.remove(&block.parent());
-                            let message = ConsensusMessage::LoopBack(block);
-                            if let Err(e) = core_channel.send(message).await {
-                                panic!("Failed to send message through core channel: {}", e);
-                            }
+                            let _ = requests.remove(&block.digest());
+
+                            let digest = digest!(block.epoch.to_le_bytes(), block.view.to_le_bytes(), block.author.0);
+                            let message = ConsensusMessage::SyncRequest(digest, name);
+                            Self::transmit(message, &name, None, &network_filter, &committee).await.unwrap();
                         },
                         Err(e) => error!("{}", e)
                     },
@@ -125,9 +124,16 @@ impl Synchronizer {
         }
     }
 
-    async fn waiter(mut store: Store, wait_on: Digest, deliver: Block) -> ConsensusResult<Block> {
-        let _ = store.notify_read(wait_on.to_vec()).await?;
-        Ok(deliver)
+    // Wait for each payload in block to be stored.
+    async fn waiter(store: Store, deliver: Block) -> ConsensusResult<Block> {
+        let mut waiting: Vec<_> = deliver.payload.clone().into_iter()
+            .map(|x| (x, store.clone()))
+            .collect();
+        let waiting: Vec<_> = waiting.iter_mut()
+            .map(|(x, y)| y.notify_read(x.to_vec()))
+            .collect();
+        let result = try_join_all(waiting).await;
+        result.map(|_| deliver).map_err(|e| ConsensusError::StoreError(e))
     }
 
     pub async fn transmit(

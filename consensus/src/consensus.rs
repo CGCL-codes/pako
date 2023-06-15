@@ -4,6 +4,7 @@ use crate::error::ConsensusResult;
 use crate::filter::Filter;
 use crate::mempool::{ConsensusMempoolMessage, MempoolDriver};
 use crate::messages::{Block, ConsensusMessage};
+use crate::synchronizer::Synchronizer;
 use crypto::{PublicKey, SignatureService};
 use log::info;
 use network::{NetReceiver, NetSender};
@@ -73,6 +74,17 @@ impl Consensus {
         // Custom filter to arbitrary delay network messages.
         Filter::run(rx_filter, tx_network, parameters.clone());
 
+        // Make the synchronizer. This instance runs in a background thread
+        // and asks other nodes for any block that we may be missing.
+        let synchronizer = Synchronizer::new(
+            name,
+            committee.clone(),
+            store.clone(),
+            /* network_filter */ tx_filter.clone(),
+            parameters.sync_retry_delay,
+        )
+        .await;
+
         let mut mvba = Core::new(
             name,
             committee,
@@ -81,6 +93,7 @@ impl Consensus {
             pk_set,
             store,
             mempool_driver,
+            synchronizer,
             /* core_channel */ rx_core,
             /* network_filter */ tx_filter,
             /* commit_channel */ tx_commit,
