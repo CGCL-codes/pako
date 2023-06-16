@@ -60,7 +60,7 @@ pub enum ConsensusMessage {
     RandomCoin(RandomCoin),
     PreVote(PreVote),
     Vote(Vote),
-    SyncRequest(Digest, PublicKey),
+    LoopBack(Block),
 }
 
 #[derive(Serialize, Deserialize, Clone)]

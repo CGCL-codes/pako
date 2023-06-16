@@ -585,6 +585,7 @@ dependencies = [
  "serde",
  "store",
  "thiserror",
+ "threshold_crypto",
  "tokio",
  "tokio-util",
 ]

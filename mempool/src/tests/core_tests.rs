@@ -2,6 +2,7 @@ use super::*;
 use crate::common::{committee, keys, payload};
 use crate::messages::Transaction;
 use crypto::SignatureService;
+use threshold_crypto::SecretKeyShare;
 use std::fs;
 use std::time::Duration;
 use tokio::sync::mpsc::channel;
@@ -29,7 +30,7 @@ async fn core(
         max_payload_size: 1,
         min_block_delay: 0,
     };
-    let signature_service = SignatureService::new(secret, None);
+    let signature_service = SignatureService::new(secret, SecretKeyShare::default());
     let _ = fs::remove_dir_all(store_path);
     let store = Store::new(store_path).unwrap();
     let synchronizer = Synchronizer::new(

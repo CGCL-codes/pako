@@ -2,7 +2,7 @@ use crate::config::Committee;
 use crate::core::MempoolMessage;
 use crate::error::{MempoolError, MempoolResult};
 use bytes::Bytes;
-use consensus::{Block, ConsensusMessage, SeqNumber};
+use consensus::{Block, ConsensusMessage, ViewNumber, EpochNumber};
 use crypto::Hash as _;
 use crypto::{Digest, PublicKey};
 use futures::future::try_join_all;
@@ -22,7 +22,7 @@ pub mod synchronizer_tests;
 
 enum SynchronizerMessage {
     Sync(HashSet<Digest>, Block),
-    Clean(SeqNumber),
+    Clean(EpochNumber),
 }
 
 pub struct Synchronizer {
@@ -59,14 +59,13 @@ impl Synchronizer {
                             let block_digest = block.digest();
                             let author = block.author;
                             let epoch = block.epoch;
-                            let view = block.view;
                             if pending.contains_key(&block_digest) {
                                 continue;
                             }
 
                             let wait_for = missing.iter().cloned().map(|x| (x, store_copy.clone())).collect();
                             let (tx_cancel, rx_cancel) = channel(1);
-                            pending.insert(block_digest, (epoch, view, tx_cancel));
+                            pending.insert(block_digest, (epoch, tx_cancel));
                             let fut = Self::waiter(wait_for, block, rx_cancel);
                             waiting.push(fut);
 
@@ -95,14 +94,14 @@ impl Synchronizer {
                                 .expect("Failed to send payload sync request");
                             }
                         },
-                        SynchronizerMessage::Clean(mut round) => {
-                            for (r, handler) in pending.values() {
-                                if r <= &round {
+                        SynchronizerMessage::Clean(mut epoch) => {
+                            for (e, handler) in pending.values() {
+                                if e <= &epoch {
                                     let _ = handler.send(()).await;
                                 }
                             }
-                            pending.retain(|_, (r, _)| r > &mut round);
-                            requests.retain(|_, (r, _)| r > &mut round);
+                            pending.retain(|_, (r, _)| r > &mut epoch);
+                            requests.retain(|_, (r, _)| r > &mut epoch);
                         }
                     },
                     Some(result) = waiting.next() => {
@@ -215,9 +214,9 @@ impl Synchronizer {
         Ok(false)
     }
 
-    pub async fn cleanup(&mut self, round: SeqNumber) {
-        let message = SynchronizerMessage::Clean(round);
-        debug!("cleanup round {}", round);
+    pub async fn cleanup(&mut self, epoch: EpochNumber) {
+        let message = SynchronizerMessage::Clean(epoch);
+        debug!("cleanup epoch {}", epoch);
         if let Err(e) = self.inner_channel.send(message).await {
             panic!("Failed to send message to synchronizer core: {}", e);
         }

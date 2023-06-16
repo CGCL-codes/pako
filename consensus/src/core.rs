@@ -5,7 +5,7 @@ use crate::aggregator::Aggregator;
 use crate::config::{Committee, Parameters, EpochNumber, ViewNumber};
 use crate::filter::FilterInput;
 use crate::mempool::MempoolDriver;
-use crate::synchronizer::{DoneState, DoneFuture, Synchronizer};
+use crate::synchronizer::{DoneState, DoneFuture, transmit};
 use crate::error::{ConsensusError, ConsensusResult};
 use crate::messages::*;
 use crypto::Hash as _;
@@ -27,7 +27,6 @@ pub struct Core {
     mempool_driver: MempoolDriver,
     core_channel: Receiver<ConsensusMessage>,
     network_filter: Sender<FilterInput>,
-    synchronizer: Synchronizer,
     commit_channel: Sender<Block>,
     votes_aggregators: HashMap<Digest, Aggregator>, // n-f votes collector
     locks: HashMap<Digest, Block>,  // blocks received in current view with sigma1
@@ -45,7 +44,6 @@ impl Core {
         pk_set: PublicKeySet,
         store: Store,
         mempool_driver: MempoolDriver,
-        synchronizer: Synchronizer,
         core_channel: Receiver<ConsensusMessage>,
         network_filter: Sender<FilterInput>,
         commit_channel: Sender<Block>,
@@ -59,7 +57,6 @@ impl Core {
             store,
             mempool_driver,
             network_filter,
-            synchronizer,
             commit_channel,
             core_channel,
             votes_aggregators: HashMap::new(),
@@ -163,7 +160,7 @@ impl Core {
     }
 
     async fn transmit(&self, message: ConsensusMessage, to: Option<&PublicKey>) -> ConsensusResult<()> {
-        Synchronizer::transmit(
+        transmit(
             message,
             &self.name,
             to,
@@ -723,19 +720,6 @@ impl Core {
         }
     }
 
-    async fn handle_sync_request(
-        &mut self,
-        digest: Digest,
-        sender: PublicKey,
-    ) -> ConsensusResult<()> {
-        if let Some(bytes) = self.store.read(digest.to_vec()).await? {
-            let block = bincode::deserialize(&bytes)?;
-            let message = ConsensusMessage::Val(block);
-            self.transmit(message, Some(&sender)).await?;
-        }
-        Ok(())
-    }
-
     async fn output(&mut self, block: Block) -> ConsensusResult<()> {
         debug!("Commit block {:?} ", block);
 
@@ -746,13 +730,21 @@ impl Core {
 
         // Let's see if we have the block's data. If we don't, the mempool will get it.
         if !self.mempool_driver.verify(block.clone()).await? {
-            if let Err(e) = self.synchronizer.inner_channel.send(block.clone()).await {
-                panic!("Failed to send request to synchronizer: {}", e);
-            }
             return Ok(());
         }
 
         // Clean up mempool.
+        self.cleanup_epoch(block).await?;
+
+        Ok(())
+    }
+
+    // TODO: Clean up blocks and payloads of non-leaders.
+    async fn cleanup_epoch(&mut self, block: Block) -> ConsensusResult<()> {
+        // Clean up blocks.
+
+
+        // Clean up payloads.
         self.mempool_driver.cleanup_async(&block).await;
 
         Ok(())
@@ -778,7 +770,7 @@ impl Core {
                         ConsensusMessage::RandomCoin(coin) => self.handle_random_coin(coin).await,
                         ConsensusMessage::PreVote(prevote) => self.handle_prevote(&prevote).await,
                         ConsensusMessage::Vote(vote) => self.handle_vote(vote).await,
-                        ConsensusMessage::SyncRequest(digest, name) => self.handle_sync_request(digest, name).await,
+                        ConsensusMessage::LoopBack(block) => self.cleanup_epoch(block).await,
                     }
                 }
             };

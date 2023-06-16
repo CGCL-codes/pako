@@ -8,6 +8,7 @@ use futures::future::try_join_all;
 use futures::sink::SinkExt as _;
 use std::fs;
 use std::time::Duration;
+use threshold_crypto::SecretKeyShare;
 use tokio::net::TcpStream;
 use tokio::sync::oneshot;
 use tokio::time::sleep;
@@ -30,7 +31,7 @@ async fn end_to_end() {
                 max_payload_size: 1,
                 min_block_delay: 0,
             };
-            let signature_service = SignatureService::new(secret, None);
+            let signature_service = SignatureService::new(secret, SecretKeyShare::default());
             let store_path = format!(".db_test_end_to_end_{}", i);
             let _ = fs::remove_dir_all(&store_path);
             let store = Store::new(&store_path).unwrap();

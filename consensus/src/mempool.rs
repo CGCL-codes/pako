@@ -16,7 +16,7 @@ pub enum PayloadStatus {
 pub enum ConsensusMempoolMessage {
     Get(usize, oneshot::Sender<Vec<Digest>>),
     Verify(Box<Block>, oneshot::Sender<PayloadStatus>),
-    Cleanup(Vec<Digest>, EpochNumber, ViewNumber),
+    Cleanup(Vec<Digest>, EpochNumber),
 }
 
 pub struct MempoolDriver {
@@ -63,7 +63,7 @@ impl MempoolDriver {
             .iter()
             .cloned()
             .collect();
-        let message = ConsensusMempoolMessage::Cleanup(digests, block.epoch, block.view);
+        let message = ConsensusMempoolMessage::Cleanup(digests, block.epoch);
         self.mempool_channel
             .send(message)
             .await
