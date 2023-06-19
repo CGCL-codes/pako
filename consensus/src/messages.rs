@@ -225,7 +225,7 @@ impl Echo {
             ConsensusError::UnknownAuthority(self.author)
         );
 
-        let pk_share = pk_set.public_key_share(committee.id(self.author));
+        let pk_share = pk_set.public_key_share(committee.id(leader));
         // Check the signature share.
         ensure!(
             pk_share.verify(&self.signature_share, &self.block_digest),

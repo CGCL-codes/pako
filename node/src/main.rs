@@ -6,10 +6,13 @@ use crate::config::{Committee, Secret};
 use crate::node::Node;
 use clap::{crate_name, crate_version, App, AppSettings, SubCommand};
 use consensus::Committee as ConsensusCommittee;
+use crypto::SecretShare;
 use env_logger::Env;
 use futures::future::join_all;
 use log::error;
 use mempool::Committee as MempoolCommittee;
+use threshold_crypto::SecretKeySet;
+use threshold_crypto::serde_impl::SerdeSecret;
 use std::fs;
 use tokio::task::JoinHandle;
 
@@ -17,7 +20,7 @@ use tokio::task::JoinHandle;
 async fn main() {
     let matches = App::new(crate_name!())
         .version(crate_version!())
-        .about("A research implementation of the HostStuff protocol.")
+        .about("A research implementation of the sMVBA protocol.")
         .args_from_usage("-v... 'Sets the level of verbosity'")
         .subcommand(
             SubCommand::with_name("keys")
@@ -114,8 +117,8 @@ fn deploy_testbed(nodes: usize) -> Result<Vec<JoinHandle<()>>, Box<dyn std::erro
             .enumerate()
             .map(|(i, key)| {
                 let name = key.name;
-                let front = format!("127.0.0.1:{}", 7000 + i).parse().unwrap();
-                let mempool = format!("127.0.0.1:{}", 7100 + i).parse().unwrap();
+                let front = format!("127.0.0.1:{}", 11000 + i).parse().unwrap();
+                let mempool = format!("127.0.0.1:{}", 11100 + i).parse().unwrap();
                 (name, front, mempool)
             })
             .collect(),
@@ -127,7 +130,7 @@ fn deploy_testbed(nodes: usize) -> Result<Vec<JoinHandle<()>>, Box<dyn std::erro
             .map(|(i, key)| {
                 let name = key.name;
                 let stake = 1;
-                let addresses = format!("127.0.0.1:{}", 7200 + i).parse().unwrap();
+                let addresses = format!("127.0.0.1:{}", 11200 + i).parse().unwrap();
                 (name, 0, stake, addresses)  // daniel: not implemented for tss yet
             })
             .collect(),
@@ -141,19 +144,37 @@ fn deploy_testbed(nodes: usize) -> Result<Vec<JoinHandle<()>>, Box<dyn std::erro
     }
     .write(committee_file)?;
 
+    // Prepare for threshold secret shares.
+    let mut rng = rand::thread_rng();
+    let sk_set = SecretKeySet::random((nodes-1)/3, &mut rng);
+    let pk_set = sk_set.public_keys();
+
     // Write the key files and spawn all nodes.
     keys.iter()
         .enumerate()
         .map(|(i, keypair)| {
-            let key_file = format!("node_{}.json", i);
-            let _ = fs::remove_file(&key_file);
-            keypair.write(&key_file)?;
+            // Write secret key file.
+            let sk_file = format!("node_sk_{}.json", i);
+            let _ = fs::remove_file(&sk_file);
+            keypair.write(&sk_file)?;
 
+            // Write secret key share file.
+            let tss_file = format!("node_tss_{}.json", i);
+            let _ = fs::remove_file(&tss_file);
+            let tss = SecretShare { 
+                id: i, 
+                name: pk_set.public_key_share(i), 
+                secret: SerdeSecret(sk_set.secret_key_share(i)), 
+                pkset: pk_set.clone(),
+            };
+            tss.write(&tss_file)?;
+
+            // Create store file.
             let store_path = format!("db_{}", i);
             let _ = fs::remove_dir_all(&store_path);
 
             Ok(tokio::spawn(async move {
-                match Node::new(committee_file, &key_file, &key_file, &store_path, None).await { // daniel: not implemented for tss yet
+                match Node::new(committee_file, &sk_file, &tss_file, &store_path, None).await { // daniel: not implemented for tss yet
                     Ok(mut node) => {
                         // Sink the commit channel.
                         while node.commit.recv().await.is_some() {}
