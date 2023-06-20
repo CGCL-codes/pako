@@ -131,7 +131,7 @@ fn deploy_testbed(nodes: usize) -> Result<Vec<JoinHandle<()>>, Box<dyn std::erro
                 let name = key.name;
                 let stake = 1;
                 let addresses = format!("127.0.0.1:{}", 11200 + i).parse().unwrap();
-                (name, 0, stake, addresses)  // daniel: not implemented for tss yet
+                (name, i, stake, addresses)  // daniel: not implemented for tss yet
             })
             .collect(),
         epoch,

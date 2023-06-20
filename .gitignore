@@ -1,3 +1,5 @@
-/target
 .*
 !.gitignore
+/target
+db_*
+*.json

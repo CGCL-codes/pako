@@ -130,3 +130,30 @@ async fn signature_service() {
     // Verify the signature we received.
     assert!(signature.verify(&digest, &public_key).is_ok());
 }
+
+#[tokio::test]
+async fn signature_service_tss() {
+    let mut rng = rand::thread_rng();
+    let sk_set = SecretKeySet::random(1, &mut rng);
+    let pk_set = sk_set.public_keys();
+    let ss = SecretShare {
+        id: 0,
+        name: pk_set.public_key_share(0),
+        secret: SerdeSecret(sk_set.secret_key_share(0)),
+        pkset: pk_set.clone(),
+    };
+
+    let message: &[u8] = b"Hello, world!";
+    let digest = message.digest();
+
+    let (_, sk) = keys().pop().unwrap();
+    let mut service = SignatureService::new(sk, ss.secret.into_inner());
+    let sig_share_0 = service.request_tss_signature(digest.clone()).await.unwrap();
+
+    let (_, sk1) = keys().pop().unwrap();
+    let mut service1 = SignatureService::new(sk1, sk_set.secret_key_share(1));
+    let sig_share_1 = service1.request_tss_signature(digest.clone()).await.unwrap();
+
+    assert!(pk_set.public_key_share(0).verify(&sig_share_0, digest.clone()));
+    assert!(pk_set.public_key_share(1).verify(&sig_share_1, digest));
+}

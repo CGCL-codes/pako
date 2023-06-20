@@ -70,6 +70,7 @@ pub struct Block {
     pub signature: Signature,
     pub epoch: EpochNumber,
     pub view: ViewNumber,
+    pub digest: Digest,
 
     // According to proof, we can tell which PBPhase this block is currently in.
     pub proof: Proof,
@@ -90,10 +91,12 @@ impl Block {
             signature: Signature::default(),
             epoch,
             view,
+            digest: Digest::default(),
             proof,
         };
-        let signature = signature_service.request_signature(block.digest()).await;
-        Self { signature, ..block }
+        let digest = block.digest();
+        let signature = signature_service.request_signature(digest.clone()).await;
+        Self { signature, digest, ..block }
     }
 
     pub fn verify(&self, committee: &Committee) -> ConsensusResult<()> {
@@ -105,21 +108,21 @@ impl Block {
         );
 
         // Check signature.
-        self.signature.verify(&self.digest(), &self.author)?;
+        self.signature.verify(&self.digest, &self.author)?;
 
         Ok(())
     }
 
     pub fn check_sigma1(&self, pk: &threshold_crypto::PublicKey) -> bool {
         if let Proof::Sigma(Some(sigma1), _) = &self.proof {
-            return pk.verify(&sigma1, self.digest())
+            return pk.verify(&sigma1, self.digest.clone())
         }
         false
     }
 
     pub fn check_sigma2(&self, pk: &threshold_crypto::PublicKey) -> bool {
         if let Proof::Sigma(_, Some(sigma2)) = &self.proof {
-            return pk.verify(&sigma2, self.digest())
+            return pk.verify(&sigma2, self.digest.clone())
         }
         false
     }
@@ -154,11 +157,15 @@ impl fmt::Debug for Block {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
         write!(
             f,
-            "{}: B(author {}, epoch {}, view {}, payload_len {}",
+            "{}: B(author {}, epoch {}, view {}, phase {}, payload_len {}",
             self.digest(),
             self.author,
             self.epoch,
             self.view,
+            match self.proof {
+                Proof::Pi(_) => "1",
+                Proof::Sigma(_, _) => "2",
+            },
             self.payload.iter().map(|x| x.size()).sum::<usize>(),
         )
     }
@@ -225,7 +232,7 @@ impl Echo {
             ConsensusError::UnknownAuthority(self.author)
         );
 
-        let pk_share = pk_set.public_key_share(committee.id(leader));
+        let pk_share = pk_set.public_key_share(committee.id(self.author));
         // Check the signature share.
         ensure!(
             pk_share.verify(&self.signature_share, &self.block_digest),
@@ -255,9 +262,17 @@ impl fmt::Debug for Echo {
 
 impl Hash for Echo {
     fn digest(&self) -> Digest {
-        // Echo is distinguished by <epoch, view, phase, ECHO>,
-        // which can be implemented by <block_digest, ECHO>.
-        digest!(self.block_digest.clone(), "ECHO")
+        // Echo is distinguished by <block_author, epoch, view, phase, ECHO>,
+        digest!(
+            self.block_author.0,
+            self.epoch.to_le_bytes(),
+            self.view.to_le_bytes(),
+            match self.phase {
+                PBPhase::Phase1 => &[0],
+                PBPhase::Phase2 => &[1],
+            },
+            "ECHO"
+        )
     }
 }
 

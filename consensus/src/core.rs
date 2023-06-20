@@ -108,7 +108,7 @@ impl Core {
 
     // Generate a new block.
     async fn generate_block(&mut self, epoch: EpochNumber, view: ViewNumber, proof: Proof) -> ConsensusResult<Block> {
-        // Make a new block.
+        // Get payloads.
         let payload = self
             .mempool_driver
             .get(self.parameters.max_payload_size)
@@ -230,8 +230,11 @@ impl Core {
                 match echo.phase {
                     PBPhase::Phase1 => {
                         // Start the second PB.
+                        let b = self.pk_set.public_key().verify(&threshold_signature, block.digest.clone());
+                        println!("Is ts_sig valid?: {}", b);
                         block.proof = Proof::Sigma(Some(threshold_signature), None);
-
+                        let a = block.check_sigma1(&self.pk_set.public_key());
+                        println!("Is sigma1 valid?: {}", a);
                         self.pb(&block).await
                     },
                     PBPhase::Phase2 => {
@@ -322,7 +325,7 @@ impl Core {
         };
 
         // Send echo msg.
-        self.echo(block.digest(), 
+        self.echo(block.digest.clone(), 
             &block.author, 
             phase, 
             block.epoch,
@@ -346,7 +349,10 @@ impl Core {
         // Start the first PB.
         let message = ConsensusMessage::Val(block.clone());
         self.transmit(message, None).await?;
-         
+
+        // Store the block.
+        self.store_block(&block).await;
+
         Ok(())
     }
 
@@ -508,7 +514,7 @@ impl Core {
             random_coin.view.to_le_bytes(),
             random_coin.leader.0,
             "PREVOTE"
-        );  
+        );
         let body = match self.locks.get(&digest) {
             Some(block) => PreVoteEnum::Yes(block.clone()),
             None => {
@@ -578,7 +584,8 @@ impl Core {
                 let body = match locked_block {
                     // Broadcast `Yes` Vote if leader's block with sigma1 was received.
                     Some(block) => {
-                        let signature_share = self.signature_service.request_tss_signature(block.digest()).await.unwrap();
+                        // Generate the share for sigma2.
+                        let signature_share = self.signature_service.request_tss_signature(block.digest.clone()).await.unwrap();
                         VoteEnum::Yes(block.clone(), signature_share)
                     },
 
