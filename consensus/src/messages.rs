@@ -194,7 +194,8 @@ pub struct Echo {
 }
 
 impl Echo {
-    pub async fn new(block_digest: Digest, 
+    pub async fn new(
+        block_digest: Digest, 
         block_author: PublicKey,
         phase: PBPhase, 
         epoch: EpochNumber,
@@ -267,10 +268,7 @@ impl Hash for Echo {
             self.block_author.0,
             self.epoch.to_le_bytes(),
             self.view.to_le_bytes(),
-            match self.phase {
-                PBPhase::Phase1 => &[0],
-                PBPhase::Phase2 => &[1],
-            },
+            self.phase.clone(),
             "ECHO"
         )
     }

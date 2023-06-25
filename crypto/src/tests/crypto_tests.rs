@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use super::*;
 use ed25519_dalek::Digest as _;
 use ed25519_dalek::Sha512;
@@ -156,4 +158,26 @@ async fn signature_service_tss() {
 
     assert!(pk_set.public_key_share(0).verify(&sig_share_0, digest.clone()));
     assert!(pk_set.public_key_share(1).verify(&sig_share_1, digest));
+}
+
+#[tokio::test]
+async fn threshold_signature_test() {
+    let sk_set = SecretKeySet::random(3, &mut rand::thread_rng());
+    let sk_shares: Vec<_> = (0..6).map(|i| sk_set.secret_key_share(i)).collect();
+    let pk_set = sk_set.public_keys();
+    let msg = "Happy birthday! If this is signed, at least four people remembered!";
+
+    // Create four signature shares for the message.
+    let sig_shares: BTreeMap<_, _> = (0..5).map(|i| (i, sk_shares[i].sign(msg))).collect();
+
+    // Validate the signature shares.
+    for (i, sig_share) in &sig_shares {
+        assert!(pk_set.public_key_share(*i).verify(sig_share, msg));
+    }
+
+    // Combine them to produce the main signature.
+    let sig = pk_set.combine_signatures(&sig_shares).expect("not enough shares");
+
+    // Validate the main signature. If the shares were valid, this can't fail.
+    assert!(pk_set.public_key().verify(&sig, msg));
 }

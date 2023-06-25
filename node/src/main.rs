@@ -1,6 +1,7 @@
 mod config;
 mod node;
 
+use std::collections::BTreeMap;
 use crate::config::Export as _;
 use crate::config::{Committee, Secret};
 use crate::node::Node;
@@ -14,6 +15,7 @@ use mempool::Committee as MempoolCommittee;
 use threshold_crypto::SecretKeySet;
 use threshold_crypto::serde_impl::SerdeSecret;
 use std::fs;
+use bincode::deserialize;
 use tokio::task::JoinHandle;
 
 #[tokio::main]
@@ -117,8 +119,8 @@ fn deploy_testbed(nodes: usize) -> Result<Vec<JoinHandle<()>>, Box<dyn std::erro
             .enumerate()
             .map(|(i, key)| {
                 let name = key.name;
-                let front = format!("127.0.0.1:{}", 11000 + i).parse().unwrap();
-                let mempool = format!("127.0.0.1:{}", 11100 + i).parse().unwrap();
+                let front = format!("127.0.0.1:{}", 13000 + i).parse().unwrap();
+                let mempool = format!("127.0.0.1:{}", 13100 + i).parse().unwrap();
                 (name, front, mempool)
             })
             .collect(),
@@ -130,7 +132,7 @@ fn deploy_testbed(nodes: usize) -> Result<Vec<JoinHandle<()>>, Box<dyn std::erro
             .map(|(i, key)| {
                 let name = key.name;
                 let stake = 1;
-                let addresses = format!("127.0.0.1:{}", 11200 + i).parse().unwrap();
+                let addresses = format!("127.0.0.1:{}", 13200 + i).parse().unwrap();
                 (name, i, stake, addresses)  // daniel: not implemented for tss yet
             })
             .collect(),
@@ -169,9 +171,31 @@ fn deploy_testbed(nodes: usize) -> Result<Vec<JoinHandle<()>>, Box<dyn std::erro
             };
             tss.write(&tss_file)?;
 
-            // Create store file.
+            // ////////////////
+            // /// test code
+            let data = fs::read(tss_file.clone())?;
+            let slice_tss: SecretShare = serde_json::from_slice(data.as_slice()).unwrap();
+
+            // test slice serialize and deserialize
             let store_path = format!("db_{}", i);
             let _ = fs::remove_dir_all(&store_path);
+
+            // test string serialize and deserialize
+            let s = serde_json::to_vec(&tss).unwrap();
+            let vec_tss: SecretShare = serde_json::from_slice(s.as_slice()).unwrap();
+
+            // Share verify test
+            let msg = "Happy birthday! If this is signed, at least four people remembered!";
+            let sig_shares: BTreeMap<_, _> = (0..4).map(|i| (i, sk_set.secret_key_share(i).sign(msg))).collect();
+            for (i, sig_share) in &sig_shares {
+                assert!(pk_set.public_key_share(*i).verify(sig_share, msg));
+            }
+            let sig = pk_set.combine_signatures(&sig_shares).expect("not enough shares");
+            println!("original verify: {}", pk_set.public_key().verify(&sig, msg));
+            println!("original verify: {}", vec_tss.pkset.public_key().verify(&sig, msg));
+
+            // /// test end
+            // /////////////////
 
             Ok(tokio::spawn(async move {
                 match Node::new(committee_file, &sk_file, &tss_file, &store_path, None).await { // daniel: not implemented for tss yet

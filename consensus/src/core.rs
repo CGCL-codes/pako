@@ -222,19 +222,20 @@ impl Core {
                         }}
                     )
                     .collect();
-
-                let shares: BTreeMap<_, _> = (0..shares.len()).map(|i| (i, shares.get(i).unwrap())).collect();
-                let threshold_signature = self.pk_set.combine_signatures(shares).expect("not enough qualified shares");
+                let shares: BTreeMap<_, _> = shares.into_iter().enumerate().collect();
+                let threshold_signature = self.pk_set.combine_signatures(&shares).expect("not enough qualified shares");
 
                 let mut block = self.get_block(&digest!(echo.epoch.to_le_bytes(), echo.view.to_le_bytes(), echo.block_author.0)).await?;
                 match echo.phase {
                     PBPhase::Phase1 => {
                         // Start the second PB.
+
+                        // /// test start
                         let b = self.pk_set.public_key().verify(&threshold_signature, block.digest.clone());
                         println!("Is ts_sig valid?: {}", b);
+                        // /// test end
+
                         block.proof = Proof::Sigma(Some(threshold_signature), None);
-                        let a = block.check_sigma1(&self.pk_set.public_key());
-                        println!("Is sigma1 valid?: {}", a);
                         self.pb(&block).await
                     },
                     PBPhase::Phase2 => {

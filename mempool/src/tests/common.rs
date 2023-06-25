@@ -1,7 +1,7 @@
 use crate::config::Committee;
 use crate::messages::Payload;
 use consensus::{Block, Proof};
-use crypto::Hash as _;
+use crypto::{Hash as _, Digest};
 use crypto::{generate_keypair, PublicKey, SecretKey, Signature};
 use rand::rngs::StdRng;
 use rand::SeedableRng as _;
@@ -65,8 +65,9 @@ pub fn block() -> Block {
         payload: Vec::new(),
         signature: Signature::default(),
         epoch: 0,
+        digest: Digest::default(),
         proof: Proof::Pi(Vec::new()),
     };
-    let signature = Signature::new(&block.digest(), &secret);
+    let signature = Signature::new(&block.digest, &secret);
     Block { signature, ..block }
 }
