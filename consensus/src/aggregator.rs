@@ -36,10 +36,12 @@ impl Aggregator {
             ConsensusMessage::RandomnessShare(_) => committee.random_coin_threshold(),
             _ => committee.quorum_threshold(),
         };
-        if self.weight >= threshold {
-            self.weight = 0; // Ensures QC is only made once.
+
+        // For simplified implementation, we skip the vote for the node itself.
+        if self.weight >= threshold - 1 && self.used.len() < threshold as usize {
             return Ok(Some(self.votes.clone()));
         }
+
         Ok(None)
     }
 

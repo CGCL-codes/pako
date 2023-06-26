@@ -167,7 +167,7 @@ async fn threshold_signature_test() {
     let pk_set = sk_set.public_keys();
     let msg = "Happy birthday! If this is signed, at least four people remembered!";
 
-    // Create four signature shares for the message.
+    // Create four signature shares for the message with format: (i, ith share).
     let sig_shares: BTreeMap<_, _> = (0..5).map(|i| (i, sk_shares[i].sign(msg))).collect();
 
     // Validate the signature shares.

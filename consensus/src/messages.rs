@@ -34,7 +34,7 @@ pub enum Proof {
 }
 
 // Two PB phase under SPB.
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Copy)]
 pub enum PBPhase {
     Phase1,
     Phase2,
@@ -45,6 +45,15 @@ impl AsRef<[u8]> for PBPhase {
         match self {
             Self::Phase1 => &[0],
             Self::Phase2 => &[1],
+        }
+    }
+}
+
+impl fmt::Display for PBPhase {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Phase1 => write!(f, "1"),
+            Self::Phase2 => write!(f, "2"),
         }
     }
 }
@@ -99,6 +108,12 @@ impl Block {
         Self { signature, digest, ..block }
     }
 
+    // Use block without payload to accelerate consensus procedure.
+    pub fn without_payload(&self) -> Self {
+        let payload = Vec::<Digest>::new();
+        Self {payload, ..self.clone()}
+    }
+
     pub fn verify(&self, committee: &Committee) -> ConsensusResult<()> {
         // Ensure the authority has voting rights.
         let voting_rights = committee.stake(&self.author);
@@ -139,10 +154,6 @@ impl Hash for Block {
         hasher.update(self.author.0);
         hasher.update(self.epoch.to_le_bytes());
         hasher.update(self.view.to_le_bytes());
-
-        for x in &self.payload {
-            hasher.update(x);
-        }
 
         match self.proof {
             Proof::Pi(_) => hasher.update(&[0]),
@@ -253,10 +264,7 @@ impl fmt::Debug for Echo {
             self.block_author,
             self.epoch,
             self.view,
-            match self.phase {
-                PBPhase::Phase1 => "1",
-                PBPhase::Phase2 => "2",
-            },
+            self.phase,
         )
     }
 }
@@ -268,7 +276,7 @@ impl Hash for Echo {
             self.block_author.0,
             self.epoch.to_le_bytes(),
             self.view.to_le_bytes(),
-            self.phase.clone(),
+            self.phase,
             "ECHO"
         )
     }
