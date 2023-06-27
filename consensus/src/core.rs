@@ -33,6 +33,7 @@ pub struct Core {
     random_coin: HashMap<Digest, RandomCoin>,   // random coins of each <epoch, view>
     synchrony_states: HashMap<Digest, Arc<Mutex<DoneState>>>, // stores states of leader election and block delivery
     blocks_received: HashMap<(PublicKey, EpochNumber, ViewNumber), Block>,  // blocks received from others and the node itself, will be updated as consensus proceeds
+    
 }
 
 impl Core {
@@ -70,16 +71,6 @@ impl Core {
 
     // Get block by digest <epoch, view, author>.
     async fn read(&mut self, digest: &Digest) -> ConsensusResult<Block> {
-        // Wait until block is stored.
-        let store_state = self.synchrony_states
-            .entry(digest.clone())
-            .or_insert(Arc::new(Mutex::new(DoneState { done: false, wakers: Vec::new() })));
-        let store_fut = DoneFuture {
-            done_state: Arc::clone(store_state),
-        };
-        store_fut.await;
-
-        // Retreive block when future done.
         match self.store.read(digest.to_vec()).await? {
             Some(bytes) => {
                 let block: Block = bincode::deserialize(&bytes)?;
@@ -95,17 +86,6 @@ impl Core {
         let key = digest.to_vec();
         let value = bincode::serialize(block).expect("Failed to serialize block");
         self.store.write(key, value).await;
-
-        // Notify store futures undone.
-        let mut store_state = self.synchrony_states
-            .entry(digest)
-            .or_insert(Arc::new(Mutex::new(DoneState { done: false, wakers: Vec::new() })))
-            .lock()
-            .unwrap();
-        store_state.done = true;
-        while let Some(waker) = store_state.wakers.pop() {
-            waker.wake();
-        }
     }
 
     // Update the proof of the block.
@@ -204,14 +184,22 @@ impl Core {
         Ok(())
     }
 
-    async fn pb(&self, block: &Block) -> ConsensusResult<()> {
+    async fn pb(&mut self, block: &Block) -> ConsensusResult<()> {
         // Collect the node's own echo.
-        self.echo(block.digest(), 
-            &block.author, 
-            phase, 
+        let echo = Echo::new(block.digest(), 
+            block.author, 
+            match &block.proof {
+                Proof::Pi(_) => PBPhase::Phase1,
+                Proof::Sigma(_, _) => PBPhase::Phase2,
+            },
             block.epoch,
-            block.view,
-            self.signature_service.clone()).await?;
+            block.view, 
+            self.name, 
+            self.signature_service.clone()).await;
+        self.votes_aggregators
+            .entry(echo.digest())
+            .or_insert_with(|| Aggregator::new())
+            .append(echo.author, ConsensusMessage::Echo(echo.clone()), self.committee.stake(&echo.author))?;
 
         // Broadcast VAL to all nodes.
         let message = ConsensusMessage::Val(block.clone());
@@ -305,7 +293,7 @@ impl Core {
 
             // Combine shares into a compete signature.
             Some(msgs) => {
-                let mut shares: BTreeMap<_, _> = msgs.into_iter()
+                let shares: BTreeMap<_, _> = msgs.into_iter()
                     .filter_map(|s| {
                         match s {
                             ConsensusMessage::Echo(echo) => {
@@ -316,10 +304,6 @@ impl Core {
                         }}
                     )
                     .collect();
-
-                // Insert the node's own share.
-                let share = self.signature_service.request_tss_signature(echo.block_digest.clone()).await.unwrap();
-                shares.insert(self.committee.id(self.name), share);
 
                 let threshold_signature = self.pk_set.combine_signatures(&shares).expect("not enough qualified shares");
                 let mut block = self.get_block(echo.block_author, echo.epoch, echo.view).unwrap().clone();
@@ -393,12 +377,16 @@ impl Core {
         }
     }
 
-    async fn done(&self, epoch: EpochNumber, view: ViewNumber) -> ConsensusResult<()> {
+    async fn done(&mut self, epoch: EpochNumber, view: ViewNumber) -> ConsensusResult<()> {
         let done = Done {
             epoch,
             view,
             author: self.name,
         };
+        self.votes_aggregators
+            .entry(done.digest())
+            .or_insert_with(|| Aggregator::new())
+            .append(done.author, ConsensusMessage::Done(done.clone()), self.committee.stake(&done.author))?;
 
         let message = ConsensusMessage::Done(done);
         self.transmit(message, None).await?;
@@ -407,24 +395,21 @@ impl Core {
     }
 
     async fn handle_done(&mut self, done: &Done) -> ConsensusResult<()> {
-        let msgs = self.votes_aggregators
+        self.votes_aggregators
             .entry(done.digest())
             .or_insert_with(|| Aggregator::new())
-            .append(done.author, ConsensusMessage::Done(done.clone()), &self.committee);
+            .append(done.author, ConsensusMessage::Done(done.clone()), self.committee.stake(&done.author))?;
+
+        let msgs = self.votes_aggregators
+        .get(&done.digest())
+        .unwrap()
+        .take(self.committee.random_coin_threshold());
 
         match msgs {
-            Err(e) => return Err(e),
-            Ok(None) => (),
-            Ok(Some(_)) => {
-                // TODO: After collecting n-f Done, abandon the rest SPB instances.
-                // This can be done by set a mutex-free bool flag indicating whether n-f done have been collected.
-                // In fact, the async/await strcuture of mvba protocol is sufficently fast to neglect actively abandoning.
-            },
-        }
+            None => (),
 
-        // f+1 Done to enter leader election phase.
-        if let Some(aggregator) = self.votes_aggregators.get(&done.digest()) {
-            if aggregator.ready_for_random_coin(&self.committee) {
+            // f+1 Done to enter leader election phase.
+            Some(_) => {
                 let randomness_share = RandomnessShare::new(
                     done.epoch,
                     done.view, 
@@ -433,6 +418,14 @@ impl Core {
                 ).await;
                 let message = ConsensusMessage::RandomnessShare(randomness_share.clone());
                 self.transmit(message, None).await?;
+            },
+        }
+
+        if let Some(aggregator) = self.votes_aggregators.get(&done.digest()) {
+            if aggregator.weight == self.committee.quorum_threshold() {
+                // TODO: After collecting n-f Done, abandon the rest SPB instances.
+                // This can be done by set a mutex-free bool flag indicating whether n-f done have been collected.
+                // In fact, the async/await strcuture of mvba protocol is sufficently fast to neglect actively abandoning.
             }
         }
 
@@ -443,19 +436,24 @@ impl Core {
         randomness_share.verify(&self.committee, &self.pk_set)?;
 
         // f+1 shares to form a random coin.
-        let shares = self.votes_aggregators
+        self.votes_aggregators
             .entry(randomness_share.digest())
             .or_insert_with(|| Aggregator::new())
-            .append(randomness_share.author, ConsensusMessage::RandomnessShare(randomness_share.clone()), &self.committee);
+            .append(randomness_share.author, 
+                ConsensusMessage::RandomnessShare(randomness_share.clone()), 
+                self.committee.stake(&randomness_share.author))?;
+
+        let shares = self.votes_aggregators
+            .get(&randomness_share.digest())
+            .unwrap()
+            .take(self.committee.random_coin_threshold());
 
         match shares {
-            Err(e) => Err(e),
-
             // Votes not enough.
-            Ok(None) => Ok(()),
+            None => Ok(()),
 
-            Ok(Some(msgs)) => {
-                let mut shares: Vec<RandomnessShare> = msgs.into_iter()
+            Some(msgs) => {
+                let shares: Vec<RandomnessShare> = msgs.into_iter()
                     .filter_map(|s| {
                         match s {
                             ConsensusMessage::RandomnessShare(share) => Some(share),
@@ -463,16 +461,6 @@ impl Core {
                         }
                     })
                     .collect();
-
-                // Insert the node's own share.
-                let share = self.signature_service.request_tss_signature(randomness_share.digest()).await.unwrap();
-                let share = RandomnessShare { 
-                    epoch: randomness_share.epoch,
-                    view: randomness_share.view,
-                    author: self.name,
-                    signature_share: share
-                };
-                shares.push(share);
 
                 // Combine shares into a complete signature.
                 let share_map = shares.iter()
@@ -535,11 +523,6 @@ impl Core {
             "FINISH"
         );
         let mut finishes = self.votes_aggregators.get(&finish_digest).unwrap().votes.clone();
-
-        // Since we won't receive the node's own finish, we rely on the block with sigma2
-        // stored in block_received which equally functions as block finished.
-        let block = self.get_block(self.name, random_coin.epoch, random_coin.view);
-        finishes.push(ConsensusMessage::Finish(Finish(block)));
 
         let leader_finish = finishes.into_iter()
             .filter_map(|f| {
