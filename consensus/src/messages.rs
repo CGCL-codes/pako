@@ -25,10 +25,10 @@ macro_rules! digest {
 // Two types of proof associated with block
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum Proof {
-    // Relates to input for Phase1 (see PBPhase defined below).
+    // Relates to input for PBPhase1 (see PBPhase defined below).
     Pi(Vec<(bool, ViewNumber, threshold_crypto::Signature)>),
 
-    // Relates to input for Phase2.
+    // Relates to input for PBPhase2.
     // sigma1(left) for PB1 output and sigma2(right) for PB2 output.
     Sigma(Option<threshold_crypto::Signature>, Option<threshold_crypto::Signature>),
 }
@@ -40,20 +40,11 @@ pub enum PBPhase {
     Phase2,
 }
 
-impl AsRef<[u8]> for PBPhase {
-    fn as_ref(&self) -> &[u8] {
-        match self {
-            Self::Phase1 => &[0],
-            Self::Phase2 => &[1],
-        }
-    }
-}
-
 impl fmt::Display for PBPhase {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Phase1 => write!(f, "1"),
-            Self::Phase2 => write!(f, "2"),
+            Self::Phase1 => write!(f, "PBPhase1"),
+            Self::Phase2 => write!(f, "PBPhase2"),
         }
     }
 }
@@ -79,7 +70,6 @@ pub struct Block {
     pub signature: Signature,
     pub epoch: EpochNumber,
     pub view: ViewNumber,
-    pub digest: Digest,
 
     // According to proof, we can tell which PBPhase this block is currently in.
     pub proof: Proof,
@@ -100,12 +90,10 @@ impl Block {
             signature: Signature::default(),
             epoch,
             view,
-            digest: Digest::default(),
             proof,
         };
-        let digest = block.digest();
-        let signature = signature_service.request_signature(digest.clone()).await;
-        Self { signature, digest, ..block }
+        let signature = signature_service.request_signature(block.digest()).await;
+        Self { signature, ..block }
     }
 
     // Use block without payload to accelerate consensus procedure.
@@ -123,21 +111,27 @@ impl Block {
         );
 
         // Check signature.
-        self.signature.verify(&self.digest, &self.author)?;
+        // Use digest of block in PBPhase1.
+        let mut mocked = self.without_payload(); 
+        mocked.proof = Proof::Pi(Vec::new());
+        self.signature.verify(&mocked.digest(), &self.author)?;
 
         Ok(())
     }
 
     pub fn check_sigma1(&self, pk: &threshold_crypto::PublicKey) -> bool {
         if let Proof::Sigma(Some(sigma1), _) = &self.proof {
-            return pk.verify(&sigma1, self.digest.clone())
+            // To verify sigma1 we should use digest of block in PBPhase1.
+            let mut mocked = self.without_payload();
+            mocked.proof = Proof::Pi(Vec::new());
+            return pk.verify(&sigma1, mocked.digest())
         }
         false
     }
 
     pub fn check_sigma2(&self, pk: &threshold_crypto::PublicKey) -> bool {
         if let Proof::Sigma(_, Some(sigma2)) = &self.proof {
-            return pk.verify(&sigma2, self.digest.clone())
+            return pk.verify(&sigma2, self.digest())
         }
         false
     }
@@ -147,20 +141,19 @@ impl Hash for Block {
     // Form a complete digest of the block,
     // denote as <ID, R, l, 1 or 2> in original paper,
     // where ID is the identifier of current MVBA instance, here we
-    // use epoch. R equals view number, l corresponds to the leader
+    // use epoch. R equals view number, l corresponds to the broadcaster
     // of the SPB instance, 1 or 2 indicates PB phase 1 or 2.
     fn digest(&self) -> Digest {
-        let mut hasher = Sha512::new();
-        hasher.update(self.author.0);
-        hasher.update(self.epoch.to_le_bytes());
-        hasher.update(self.view.to_le_bytes());
-
-        match self.proof {
-            Proof::Pi(_) => hasher.update(&[0]),
-            Proof::Sigma(_, _) => hasher.update(&[1]),
-        };
-
-        Digest(hasher.finalize().as_slice()[..32].try_into().unwrap())
+        digest!(
+            self.author.0,
+            self.epoch.to_le_bytes(),
+            self.view.to_le_bytes(),
+            match &self.proof {
+                Proof::Pi(_) => &[0],
+                Proof::Sigma(_, _) => &[1],
+            },
+            "BLOCK"
+        )
     }
 }
 
@@ -168,7 +161,7 @@ impl fmt::Debug for Block {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
         write!(
             f,
-            "{}: B(author {}, epoch {}, view {}, phase {}, payload_len {}",
+            "{}: B(author {}, epoch {}, view {}, PBPhase {}, payload_len {}",
             self.digest(),
             self.author,
             self.epoch,
@@ -259,7 +252,7 @@ impl fmt::Debug for Echo {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
         write!(
             f, 
-            "Echo(author {}, block_author {}, epoch {}, view {}, phase {})", 
+            "Echo(author {}, block_author {}, epoch {}, view {}, PBPhase {})", 
             self.author,
             self.block_author,
             self.epoch,
@@ -276,7 +269,10 @@ impl Hash for Echo {
             self.block_author.0,
             self.epoch.to_le_bytes(),
             self.view.to_le_bytes(),
-            self.phase,
+            match self.phase {
+                PBPhase::Phase1 => &[0],
+                PBPhase::Phase2 => &[1],
+            },
             "ECHO"
         )
     }
@@ -293,17 +289,14 @@ pub struct Lock {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct Finish {
-    pub block: Block,
-    pub author: PublicKey,
-}
+pub struct Finish(pub Block);
 
 impl Hash for Finish {
     fn digest(&self) -> Digest {
         // Finish is distinguished by <epoch, view, FINISH>,
         digest!(
-            self.block.epoch.to_le_bytes(),
-            self.block.view.to_le_bytes(),
+            self.0.epoch.to_le_bytes(),
+            self.0.view.to_le_bytes(),
             "FINISH"
         )
     }
@@ -348,7 +341,7 @@ impl RandomnessShare {
         author: PublicKey,
         mut signature_service: SignatureService,
     ) -> Self {
-        let digest = digest!(epoch.to_le_bytes(), view.to_le_bytes());
+        let digest = digest!(epoch.to_le_bytes(), view.to_le_bytes(), "RANDOMNESS_SHARE");
         let signature_share = signature_service.request_tss_signature(digest).await.unwrap();
         Self {
             epoch,
@@ -387,7 +380,7 @@ impl Hash for RandomnessShare {
 
 impl fmt::Debug for RandomnessShare {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
-        write!(f, "RandomnessShare (author {}, view {}, sig share {:?})", self.author, self.view, self.signature_share)
+        write!(f, "RandomnessShare (author {}, epoch {}, view {})", self.author, self.epoch, self.view)
     }
 }
 
