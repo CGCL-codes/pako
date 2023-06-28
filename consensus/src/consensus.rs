@@ -84,7 +84,7 @@ impl Consensus {
             /* core_channel */ rx_core,
             /* network_filter */ tx_filter,
             /* commit_channel */ tx_commit,
-        );
+        ).await;
 
         tokio::spawn(async move {
             mvba.run().await;

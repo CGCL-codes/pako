@@ -1,4 +1,4 @@
-use crate::config::{EpochNumber, ViewNumber};
+use crate::config::EpochNumber;
 use crate::error::{ConsensusError, ConsensusResult};
 use crate::messages::Block;
 use crypto::Digest;

@@ -1,20 +1,22 @@
-use std::collections::{HashMap, BTreeMap};
+use std::collections::{HashMap, BTreeMap, HashSet};
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
-
 use crate::aggregator::Aggregator;
 use crate::config::{Committee, Parameters, EpochNumber, ViewNumber};
 use crate::filter::FilterInput;
 use crate::mempool::MempoolDriver;
-use crate::synchronizer::{DoneState, DoneFuture, transmit};
+use crate::synchronizer::{ElectionState, ElectionFuture, transmit};
 use crate::error::{ConsensusError, ConsensusResult};
 use crate::messages::*;
 use crypto::Hash as _;
 use crypto::{Digest, PublicKey, SignatureService};
 use ed25519_dalek::Digest as _;
 use ed25519_dalek::Sha512;
-use log::{debug, warn, error};
-use threshold_crypto::{PublicKeySet, SignatureShare};
-use tokio::sync::mpsc::{Receiver, Sender};
+use futures::{StreamExt, Future};
+use futures::stream::FuturesUnordered;
+use log::{debug, warn, error, info};
+use threshold_crypto::PublicKeySet;
+use tokio::sync::mpsc::{Receiver, Sender, channel};
 use store::Store;
 
 pub struct Core {
@@ -27,18 +29,18 @@ pub struct Core {
     mempool_driver: MempoolDriver,
     core_channel: Receiver<ConsensusMessage>,
     network_filter: Sender<FilterInput>,
-    commit_channel: Sender<Block>,
+    halt_channel: Sender<(Arc<Mutex<ElectionState>>, Block)>, // handle halts
+    advance_channel: Receiver<Block>, // propose block for next epoch
     votes_aggregators: HashMap<Digest, Aggregator>, // n-f votes collector
     locks: HashMap<Digest, Block>,  // blocks received in current view with sigma1
-    random_coin: HashMap<Digest, RandomCoin>,   // random coins of each <epoch, view>
-    synchrony_states: HashMap<Digest, Arc<Mutex<DoneState>>>, // stores states of leader election and block delivery
+    election_states: HashMap<(EpochNumber, ViewNumber), Arc<Mutex<ElectionState>>>, // stores states of leader election and block delivery
     blocks_received: HashMap<(PublicKey, EpochNumber, ViewNumber), Block>,  // blocks received from others and the node itself, will be updated as consensus proceeds
-    
+
 }
 
 impl Core {
     #[allow(clippy::too_many_arguments)]
-    pub fn new(
+    pub async fn new(
         name: PublicKey,
         committee: Committee,
         parameters: Parameters,
@@ -50,6 +52,58 @@ impl Core {
         network_filter: Sender<FilterInput>,
         commit_channel: Sender<Block>,
     ) -> Self {
+        // Handle Halt for synchronization.
+        let (tx_halt, mut rx_halt): (_, Receiver<(Arc<Mutex<ElectionState>>, Block)>) = channel(10000);
+        let (tx_advance, rx_advance): (Sender<Block>, _) = channel(10000);
+        tokio::spawn(async move {
+            let mut watermark = 0; // all epochs no larger than watermark are halted.
+            let mut halted = HashSet::new();
+            let mut halts_unhandled = HashMap::<EpochNumber, Vec<Block>>::new();
+            let mut waiting = FuturesUnordered::<Pin<Box<dyn Future<Output=RandomCoin> + Send>>>::new();
+            loop {
+                tokio::select! {
+                    Some((election_state, block)) = rx_halt.recv() => {
+                        halts_unhandled.entry(block.epoch)
+                            .or_insert_with(|| {
+                                waiting.push(Box::pin(ElectionFuture{election_state}));
+                                Vec::new()
+                            })
+                            .push(block);
+                    },
+                    Some(coin) = waiting.next() => {
+                        let blocks = halts_unhandled.remove(&coin.epoch).unwrap();
+                        let verified = blocks.into_iter()
+                            .find(|b| b.author == coin.leader && !halted.contains(&coin.epoch) && coin.epoch > watermark);
+                        if let Some(verified) = verified {
+                            // Broadcast Halt and propose block of next epoch.
+                            if let Err(e) = tx_advance.send(verified.clone()).await {
+                                panic!("Failed to send message through advance channel: {}", e);
+                            }
+
+                            // Output block.
+                            if let Err(e) = commit_channel.send(verified.clone()).await {
+                                panic!("Failed to send message through commit channel: {}", e);
+                            } else {
+                                info!("Commit block {} in epoch {}, view {}, by member {}", 
+                                    verified.digest(),
+                                    verified.epoch,
+                                    verified.view,
+                                    verified.author    
+                                );
+                            }
+
+                            // Clean up halted.
+                            halted.insert(coin.epoch);
+                            if halted.remove(&(watermark + 1)) {
+                                watermark += 1;
+                            }
+                        }
+                    },
+                    else => break,
+                }
+            }
+        });
+
         Self {
             name,
             committee,
@@ -59,12 +113,12 @@ impl Core {
             store,
             mempool_driver,
             network_filter,
-            commit_channel,
             core_channel,
+            halt_channel: tx_halt,
+            advance_channel: rx_advance,
             votes_aggregators: HashMap::new(),
             locks: HashMap::new(),
-            random_coin: HashMap::new(),
-            synchrony_states: HashMap::new(),
+            election_states: HashMap::new(),
             blocks_received: HashMap::new(),
         }
     }
@@ -115,25 +169,6 @@ impl Core {
         ).await;
 
         Ok(block)
-    }
-
-    // Get the leader of <epoch, view>.
-    async fn get_leader(&mut self, epoch: EpochNumber, view: ViewNumber) -> ConsensusResult<PublicKey> {
-        ensure!(
-            epoch > 0 && view > 0,
-            ConsensusError::InvalidEpochOrView(epoch, view)
-        );
-
-        // <epoch, view> as key to get corresponding election state of from synchrony_states.
-        let digest = digest!(epoch.to_le_bytes(), view.to_le_bytes());
-        let election_state = self.synchrony_states
-            .entry(digest.clone())
-            .or_insert(Arc::new(Mutex::new(DoneState { done: false, wakers: Vec::new() })));
-        let election_fut = DoneFuture {
-            done_state: Arc::clone(election_state),
-        };
-        election_fut.await;
-        Ok(self.random_coin.get(&digest).unwrap().leader)
     }
 
     // TODO: implement check_value()
@@ -284,7 +319,7 @@ impl Core {
             .append(echo.author, ConsensusMessage::Echo(echo.clone()), self.committee.stake(&echo.author))?;
 
         let shares = self.votes_aggregators
-            .get(&echo.digest())
+            .get_mut(&echo.digest())
             .unwrap()
             .take(self.committee.quorum_threshold());
 
@@ -312,8 +347,6 @@ impl Core {
                         // Update proof.
                         block.proof = Proof::Sigma(Some(threshold_signature), None);
                         self.update_block(block.clone());
-
-                        let a = block.verify(&self.committee).is_ok();
 
                         // Start the second PB.
                         self.pb(&block).await
@@ -363,7 +396,7 @@ impl Core {
             .append(finish.0.author, ConsensusMessage::Finish(finish.clone()), self.committee.stake(&finish.0.author))?;
 
         let finishes = self.votes_aggregators
-            .get(&finish.digest())
+            .get_mut(&finish.digest())
             .unwrap()
             .take(self.committee.quorum_threshold());
 
@@ -383,6 +416,8 @@ impl Core {
             view,
             author: self.name,
         };
+
+        // Collect the node's own done.
         self.votes_aggregators
             .entry(done.digest())
             .or_insert_with(|| Aggregator::new())
@@ -401,7 +436,7 @@ impl Core {
             .append(done.author, ConsensusMessage::Done(done.clone()), self.committee.stake(&done.author))?;
 
         let msgs = self.votes_aggregators
-        .get(&done.digest())
+        .get_mut(&done.digest())
         .unwrap()
         .take(self.committee.random_coin_threshold());
 
@@ -416,6 +451,15 @@ impl Core {
                     self.name, 
                     self.signature_service.clone()
                 ).await;
+
+                // Collect the node's own randomness share.
+                self.votes_aggregators
+                    .entry(randomness_share.digest())
+                    .or_insert_with(|| Aggregator::new())
+                    .append(randomness_share.author, 
+                        ConsensusMessage::RandomnessShare(randomness_share.clone()), 
+                        self.committee.stake(&randomness_share.author))?;
+
                 let message = ConsensusMessage::RandomnessShare(randomness_share.clone());
                 self.transmit(message, None).await?;
             },
@@ -444,7 +488,7 @@ impl Core {
                 self.committee.stake(&randomness_share.author))?;
 
         let shares = self.votes_aggregators
-            .get(&randomness_share.digest())
+            .get_mut(&randomness_share.digest())
             .unwrap()
             .take(self.committee.random_coin_threshold());
 
@@ -490,23 +534,13 @@ impl Core {
     async fn handle_random_coin(&mut self, random_coin: RandomCoin) -> ConsensusResult<()> {
         random_coin.verify(&self.committee, &self.pk_set)?;
 
-        // Store coins not handled before.
-        if self.random_coin.contains_key(&random_coin.digest()) {
-            return Ok(())
-        }
-        self.random_coin.insert(random_coin.digest(), random_coin.clone());
-
-        // Set ElectionState of <epoch, view> of done msg as `done`,
-        // this wakes up the Waker of ElectionFuture of get_leader(),
-        // then all calls of get_leader().await make progress.
+        // This wakes up the waker of ElectionFuture in task for handling Halt.
         {
-            let digest = digest!(random_coin.epoch.to_le_bytes(), random_coin.view.to_le_bytes());
-            let mut election_state = self.synchrony_states
-                .entry(digest)
-                .or_insert(Arc::new(Mutex::new(DoneState { done: false, wakers: Vec::new() })))
+            let mut election_state = self.election_states
+                .entry((random_coin.epoch, random_coin.view))
+                .or_insert(Arc::new(Mutex::new(ElectionState { coin: Some(random_coin.clone()), wakers: Vec::new() })))
                 .lock()
                 .unwrap();
-            election_state.done = true;
             while let Some(waker) = election_state.wakers.pop() {
                 waker.wake();
             }
@@ -522,7 +556,7 @@ impl Core {
             random_coin.view.to_le_bytes(),
             "FINISH"
         );
-        let mut finishes = self.votes_aggregators.get(&finish_digest).unwrap().votes.clone();
+        let finishes = self.votes_aggregators.get(&finish_digest).unwrap().votes.clone();
 
         let leader_finish = finishes.into_iter()
             .filter_map(|f| {
@@ -543,6 +577,8 @@ impl Core {
             self.spb(new_block).await?;
         }
 
+        // Enter two-vote phase.
+
         // This is a digest of PreVote msg constructed in advance to retrieve block in lock, 
         // and used to verify `No` prevotes if block in None.
         let digest = digest!(
@@ -551,57 +587,56 @@ impl Core {
             random_coin.leader.0,
             "PREVOTE"
         );
-        let body = match self.locks.get(&digest) {
-            Some(block) => PreVoteEnum::Yes(block.clone()),
+
+        let body: Option<_> = match self.get_block(random_coin.leader, random_coin.epoch, random_coin.view) {
+            Some(block) => {
+                match &block.proof {
+                    Proof::Sigma(_, _) => Some(PreVoteEnum::Yes(block.clone())),
+                    Proof::Pi(_) => None,
+                }
+            },
+            _ => None,
+        };
+        let body = match body {
+            Some(body) => body,
             None => {
                 let signature_share = self.signature_service.request_tss_signature(digest).await.unwrap();
                 PreVoteEnum::No(signature_share)
-            },
+            }
         };
 
-        let body = match self.get_block(random_coin.leader, random_coin.epoch, random_coin.view) 
+        let prevote = PreVote {
+            author: self.name, 
+            epoch: random_coin.epoch,
+            view: random_coin.view,
+            leader: random_coin.leader,
+            body,
+        };
+
+        // Collect the node's own Prevote.
+        self.votes_aggregators
+            .entry(prevote.digest())
+            .or_insert_with(|| Aggregator::new())
+            .append(prevote.author, ConsensusMessage::PreVote(prevote.clone()), self.committee.stake(&prevote.author))?;
 
         // Broadcast PreVote message if leader's Finish was not delivered.
-        self.transmit(
-            ConsensusMessage::PreVote(PreVote {
-                    author: self.name, 
-                    epoch: random_coin.epoch,
-                    view: random_coin.view,
-                    leader: random_coin.leader,
-                    body
-                }), None).await
-    }
-
-    async fn handle_halt(&mut self, block: &Block) -> ConsensusResult<()> {
-        if block.author == self.get_leader(block.epoch, block.view).await.unwrap() {
-            block.verify(&self.committee)?;
-
-            // Broadcast halt and output
-            let halt = ConsensusMessage::Halt(block.clone());
-            self.transmit(halt, None).await?;
-            self.output(block.clone()).await?;
-
-            // Propose next block.
-            let new_block = self.generate_block(block.epoch+1, block.view+1, Proof::Pi(Vec::new())).await?;
-            self.spb(new_block).await?;    
-        }
-
-        Ok(())
+        self.transmit(ConsensusMessage::PreVote(prevote), None).await
     }
 
     async fn handle_prevote(&mut self, prevote: &PreVote) -> ConsensusResult<()> {
         prevote.verify(&self.committee, &self.pk_set)?;
 
-        let prevotes = self.votes_aggregators
+        self.votes_aggregators
             .entry(prevote.digest())
             .or_insert_with(|| Aggregator::new())
-            .append(prevote.author, ConsensusMessage::PreVote(prevote.clone()), &self.committee);
+            .append(prevote.author, ConsensusMessage::PreVote(prevote.clone()), self.committee.stake(&prevote.author))?;
+
+        let prevotes = self.votes_aggregators.get_mut(&prevote.digest()).unwrap().take(self.committee.quorum_threshold());
 
         match prevotes {
-            Err(e) => Err(e),
-            Ok(None) => Ok(()),
+            None => Ok(()),
             
-            Ok(Some(prevotes)) => {
+            Some(prevotes) => {
                 let locked_block = prevotes.iter()
                 .filter_map(|prevote| {
                     match prevote {
@@ -663,6 +698,13 @@ impl Core {
                     leader: prevote.leader,
                     body,
                 };
+
+                // Collect the node's own Vote.
+                self.votes_aggregators
+                    .entry(vote.digest())
+                    .or_insert_with(|| Aggregator::new())
+                    .append(vote.author, ConsensusMessage::Vote(vote.clone()), self.committee.stake(&vote.author))?;
+
                 self.transmit(ConsensusMessage::Vote(vote), None).await
             },
         }
@@ -671,18 +713,18 @@ impl Core {
     async fn handle_vote(&mut self, vote: Vote) -> ConsensusResult<()> {
         vote.verify(&self.committee, &self.pk_set)?;
 
-        let votes = self.votes_aggregators
+        self.votes_aggregators
             .entry(vote.digest())
             .or_insert_with(|| Aggregator::new())
-            .append(vote.author, ConsensusMessage::Vote(vote.clone()), &self.committee);
+            .append(vote.author, ConsensusMessage::Vote(vote.clone()), self.committee.stake(&vote.author))?;
+
+        let votes = self.votes_aggregators.get_mut(&vote.digest()).unwrap().take(self.committee.quorum_threshold());
 
         match votes {
-            Err(e) => Err(e),
-
             // Votes not enough.
-            Ok(None) => Ok(()),
+            None => Ok(()),
 
-            Ok(Some(votes)) => {
+            Some(votes) => {
                 let votes: Vec<_> = votes.into_iter()
                 .filter_map(|vote| {
                     match vote {
@@ -763,13 +805,39 @@ impl Core {
         }
     }
 
+    async fn handle_halt(&mut self, block: Block) -> ConsensusResult<()> {
+        block.verify(&self.committee)?;
+
+        let election_state = self.election_states
+            .entry((block.epoch, block.view))
+            .or_insert(Arc::new(Mutex::new(ElectionState { coin: None, wakers: Vec::new() })))
+            .clone();
+
+        let _ = self.halt_channel.send((election_state, block)).await;
+
+        // if block.author == self.get_leader(block.epoch, block.view).await.unwrap() {
+        //     block.verify(&self.committee)?;
+
+        //     // Broadcast halt and output
+        //     let halt = ConsensusMessage::Halt(block.clone());
+        //     self.transmit(halt, None).await?;
+        //     self.output(block.clone()).await?;
+
+        //     // Propose next block.
+        //     let new_block = self.generate_block(block.epoch+1, block.view+1, Proof::Pi(Vec::new())).await?;
+        //     self.spb(new_block).await?;    
+        // }
+
+        Ok(())
+    }
+
     async fn output(&mut self, block: Block) -> ConsensusResult<()> {
         debug!("Commit block {:?} ", block);
 
         // Output.
-        if let Err(e) = self.commit_channel.send(block.clone()).await {
-            warn!("Failed to send block through the commit channel: {}", e);
-        }
+        // if let Err(e) = self.commit_channel.send(block.clone()).await {
+        //     warn!("Failed to send block through the commit channel: {}", e);
+        // }
 
         // Let's see if we have the block's data. If we don't, the mempool will get it.
         if !self.mempool_driver.verify(block.clone()).await? {
@@ -798,7 +866,7 @@ impl Core {
         let block = self.generate_block(1, 1, Proof::Pi(Vec::new()))
             .await
             .expect("Failed to generate the first block.");
-        self.spb(block).await.expect("Failed to broadcast the first block.");
+        self.spb(block).await.expect("Failed to start spb the first block.");
 
         loop {
             let result = tokio::select! {
@@ -807,7 +875,7 @@ impl Core {
                         ConsensusMessage::Val(block) => self.handle_val(block).await,
                         ConsensusMessage::Echo(echo) => self.handle_echo(&echo).await,
                         ConsensusMessage::Finish(finish) => self.handle_finish(&finish).await,
-                        ConsensusMessage::Halt(block) => self.handle_halt(&block).await,
+                        ConsensusMessage::Halt(block) => self.handle_halt(block).await,
                         ConsensusMessage::Done(done) => self.handle_done(&done).await,
                         ConsensusMessage::RandomnessShare(randomness_share) => self.handle_randommess_share(&randomness_share).await,
                         ConsensusMessage::RandomCoin(coin) => self.handle_random_coin(coin).await,
@@ -815,7 +883,17 @@ impl Core {
                         ConsensusMessage::Vote(vote) => self.handle_vote(vote).await,
                         ConsensusMessage::LoopBack(block) => self.cleanup_epoch(block).await,
                     }
-                }
+                },
+                Some(block) = self.advance_channel.recv() => {                    
+                    let new_block = self.generate_block(block.epoch, 1, Proof::Pi(Vec::new()))
+                        .await
+                        .expect(&format!("Failed to generate block of epoch {}", block.epoch));
+                    self.spb(new_block).await.expect(&format!("Failed to start spb block of epoch {}", block.epoch));
+
+                    // Forward Halt to others.
+                    self.transmit(ConsensusMessage::Halt(block), None).await
+                },
+                else => break,
             };
 
             match result {

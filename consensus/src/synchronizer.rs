@@ -1,4 +1,4 @@
-use crate::config::Committee;
+use crate::{config::Committee, messages::RandomCoin};
 use crate::messages::ConsensusMessage;
 use crate::error::ConsensusResult;
 use crate::filter::FilterInput;
@@ -12,25 +12,26 @@ use tokio::sync::mpsc::Sender;
 #[path = "tests/synchronizer_tests.rs"]
 pub mod synchronizer_tests;
 
-pub struct DoneState {
-    pub done: bool,
+pub struct ElectionState {
+    pub coin: Option<RandomCoin>,
     pub wakers: Vec<Waker>,
 }
 
-pub struct DoneFuture {
-    pub done_state: Arc<Mutex<DoneState>>,
+pub struct ElectionFuture {
+    pub election_state: Arc<Mutex<ElectionState>>,
 }
 
-impl Future for DoneFuture {
-    type Output = ();
+impl Future for ElectionFuture {
+    type Output = RandomCoin;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let mut done_state = self.done_state.lock().unwrap();
-        if done_state.done {
-            Poll::Ready(())
-        } else {
-            done_state.wakers.push(cx.waker().clone());
-            Poll::Pending
+        let mut election_state = self.election_state.lock().unwrap();
+        match &election_state.coin {
+            Some(coin) => Poll::Ready(coin.clone()),
+            None => {
+                election_state.wakers.push(cx.waker().clone());
+                Poll::Pending
+            },
         }
     }
 }

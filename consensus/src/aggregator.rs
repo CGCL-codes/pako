@@ -1,4 +1,4 @@
-use crate::config::{Committee, Stake};
+use crate::config::Stake;
 use crate::error::{ConsensusError, ConsensusResult};
 use crate::messages::ConsensusMessage;
 use crypto::PublicKey;
@@ -38,7 +38,7 @@ impl Aggregator {
         Ok(())
     }
 
-    pub fn take(&self, threshold: Stake) -> Option<Vec<ConsensusMessage>> {
+    pub fn take(&mut self, threshold: Stake) -> Option<Vec<ConsensusMessage>> {
         if self.weight >= threshold && !self.is_taken {
             self.is_taken = true;
             return Some(self.votes.clone());
@@ -46,8 +46,4 @@ impl Aggregator {
         None
     }
 
-    // To see if votes meet random coin threshold.
-    pub fn ready_for_random_coin(&self, committee: &Committee) -> bool {
-        self.weight == committee.random_coin_threshold()
-    }
 }
