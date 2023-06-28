@@ -12,6 +12,7 @@ use tokio::sync::mpsc::Sender;
 #[path = "tests/synchronizer_tests.rs"]
 pub mod synchronizer_tests;
 
+#[derive(Debug)]
 pub struct ElectionState {
     pub coin: Option<RandomCoin>,
     pub wakers: Vec<Waker>,

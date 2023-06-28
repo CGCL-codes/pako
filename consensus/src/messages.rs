@@ -432,7 +432,7 @@ impl RandomCoin {
 
 impl fmt::Debug for RandomCoin {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
-        write!(f, "RandomCoin(view {}, leader {})", self.view, self.leader)
+        write!(f, "RandomCoin(epoch {}, view {}, leader {})", self.epoch, self.view, self.leader)
     }
 }
 

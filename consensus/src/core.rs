@@ -535,9 +535,16 @@ impl Core {
         random_coin.verify(&self.committee, &self.pk_set)?;
 
         // This wakes up the waker of ElectionFuture in task for handling Halt.
+        let mut is_handled = false;
         {
             let mut election_state = self.election_states
                 .entry((random_coin.epoch, random_coin.view))
+                .and_modify(|e| {
+                    match e.lock().unwrap().coin {
+                        Some(_) => is_handled = true,
+                        _ => (),
+                    }
+                })
                 .or_insert(Arc::new(Mutex::new(ElectionState { coin: Some(random_coin.clone()), wakers: Vec::new() })))
                 .lock()
                 .unwrap();
@@ -545,10 +552,12 @@ impl Core {
                 waker.wake();
             }
         }
-        
+
         // Multicast the random coin.
-        let message = ConsensusMessage::RandomCoin(random_coin.clone());
-        self.transmit(message, None).await?;
+        if !is_handled {
+            let message = ConsensusMessage::RandomCoin(random_coin.clone());
+            self.transmit(message, None).await?;
+        }
 
         // Had the current leader's Finish received, halt and output.
         let finish_digest = digest!(
@@ -568,17 +577,14 @@ impl Core {
             .find(|f| f.0.author == random_coin.leader);
 
         if let Some(leader_finish) = leader_finish {
-            let halt = ConsensusMessage::Halt(leader_finish.0.clone());
-            self.transmit(halt, None).await?;
-
-            // Terminate and start a new epoch.
-            self.output(leader_finish.0.clone()).await?;
-            let new_block = self.generate_block(random_coin.epoch + 1, 1, Proof::Pi(Vec::new())).await?;
-            self.spb(new_block).await?;
+            let election_state = self.election_states
+                .get(&(leader_finish.0.epoch, leader_finish.0.view))
+                .unwrap();
+            self.halt_channel.send((election_state.clone(), leader_finish.0)).await.expect("Failed to send Halt through halt channel.");
         }
 
         // Enter two-vote phase.
-
+        //
         // This is a digest of PreVote msg constructed in advance to retrieve block in lock, 
         // and used to verify `No` prevotes if block in None.
         let digest = digest!(
@@ -749,12 +755,16 @@ impl Core {
                             // Add sigma2 and broadcast finish.
                             let mut completed_block = block.clone();
                             completed_block.proof = Proof::Sigma(sigma1.clone(), Some(sigma2));
-                            self.transmit(ConsensusMessage::Halt(completed_block.clone()), None).await?;
-                            self.output(completed_block).await?;
+                            // self.transmit(ConsensusMessage::Halt(completed_block.clone()), None).await?;
+                            // self.output(completed_block).await?;
                             
-                            // Propose next block.
-                            let new_block = self.generate_block(block.epoch+1, block.view+1, Proof::Pi(Vec::new())).await?;
-                            self.transmit(ConsensusMessage::Val(new_block), None).await?
+                            // // Propose next block.
+                            // let new_block = self.generate_block(block.epoch+1, block.view+1, Proof::Pi(Vec::new())).await?;
+                            // self.transmit(ConsensusMessage::Val(new_block), None).await?
+                            let election_state = self.election_states
+                                .get(&(completed_block.epoch, completed_block.view))
+                                .unwrap();
+                            self.halt_channel.send((election_state.clone(), completed_block)).await.expect("Failed to send Halt through halt channel.");
                         }
                     }
                 } 
@@ -813,7 +823,7 @@ impl Core {
             .or_insert(Arc::new(Mutex::new(ElectionState { coin: None, wakers: Vec::new() })))
             .clone();
 
-        let _ = self.halt_channel.send((election_state, block)).await;
+        self.halt_channel.send((election_state, block)).await.expect("Failed to send Halt through halt channel.");
 
         // if block.author == self.get_leader(block.epoch, block.view).await.unwrap() {
         //     block.verify(&self.committee)?;
@@ -885,8 +895,7 @@ impl Core {
                     }
                 },
                 Some(block) = self.advance_channel.recv() => {                    
-                    let new_block = self.generate_block(block.epoch, 1, Proof::Pi(Vec::new()))
-                        .await
+                    let new_block = self.generate_block(block.epoch+1, 1, Proof::Pi(Vec::new())).await
                         .expect(&format!("Failed to generate block of epoch {}", block.epoch));
                     self.spb(new_block).await.expect(&format!("Failed to start spb block of epoch {}", block.epoch));
 
