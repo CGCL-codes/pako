@@ -83,11 +83,11 @@ impl Core {
                             if let Err(e) = commit_channel.send(verified.clone()).await {
                                 panic!("Failed to send message through commit channel: {}", e);
                             } else {
-                                info!("Commit block {} in epoch {}, view {}, by member {}", 
+                                info!("Commit block {} of member {} in epoch {}, view {}", 
                                     verified.digest(),
+                                    verified.author,
                                     verified.epoch,
-                                    verified.view,
-                                    verified.author    
+                                    verified.view,    
                                 );
                             }
                             // Clean up halted.
@@ -533,13 +533,13 @@ impl Core {
         random_coin.verify(&self.committee, &self.pk_set)?;
 
         // This wakes up the waker of ElectionFuture in task for handling Halt.
-        let mut is_handled = false;
+        let mut is_handled_before = false;
         {
             let mut election_state = self.election_states
                 .entry((random_coin.epoch, random_coin.view))
                 .and_modify(|e| {
                     match e.lock().unwrap().coin {
-                        Some(_) => is_handled = true,
+                        Some(_) => is_handled_before = true,
                         _ => (),
                     }
                 })
@@ -551,11 +551,14 @@ impl Core {
             }
         }
 
-        // Multicast the random coin.
-        if !is_handled {
-            let message = ConsensusMessage::RandomCoin(random_coin.clone());
-            self.transmit(message, None).await?;
+        // Skip coins already handled.
+        if is_handled_before {
+            return Ok(())
         }
+
+        // Multicast the random coin.
+        let message = ConsensusMessage::RandomCoin(random_coin.clone());
+        self.transmit(message, None).await?;
 
         // Had the current leader's Finish received, halt and output.
         let finish_digest = digest!(
@@ -575,10 +578,7 @@ impl Core {
             .find(|f| f.0.author == random_coin.leader);
 
         if let Some(leader_finish) = leader_finish {
-            let election_state = self.election_states
-                .get(&(leader_finish.0.epoch, leader_finish.0.view))
-                .unwrap();
-            self.halt_channel.send((election_state.clone(), leader_finish.0)).await.expect("Failed to send Halt through halt channel.");
+            self.handle_halt(leader_finish.0).await?;
         }
 
         // Enter two-vote phase.
@@ -616,7 +616,6 @@ impl Core {
             leader: random_coin.leader,
             body,
         };
-
         // Collect the node's own Prevote.
         self.votes_aggregators
             .entry(prevote.digest())
@@ -747,22 +746,12 @@ impl Core {
                     let shares: BTreeMap<_, _> = (0..shares.len()).map(|i| (i, shares.get(i).unwrap())).collect();
                     let sigma2 = self.pk_set.combine_signatures(shares).expect("not enough qualified shares");
                     
-                    // Finish broadcasting leader's block, halt and output. 
+                    // Add sigma2 and halt.
                     if let VoteEnum::Yes(block, _) = &vote.body {
                         if let Proof::Sigma(sigma1, _) = &block.proof {
-                            // Add sigma2 and broadcast finish.
                             let mut completed_block = block.clone();
                             completed_block.proof = Proof::Sigma(sigma1.clone(), Some(sigma2));
-                            // self.transmit(ConsensusMessage::Halt(completed_block.clone()), None).await?;
-                            // self.output(completed_block).await?;
-                            
-                            // // Propose next block.
-                            // let new_block = self.generate_block(block.epoch+1, block.view+1, Proof::Pi(Vec::new())).await?;
-                            // self.transmit(ConsensusMessage::Val(new_block), None).await?
-                            let election_state = self.election_states
-                                .get(&(completed_block.epoch, completed_block.view))
-                                .unwrap();
-                            self.halt_channel.send((election_state.clone(), completed_block)).await.expect("Failed to send Halt through halt channel.");
+                            self.handle_halt(completed_block).await?;
                         }
                     }
                 } 
@@ -815,6 +804,11 @@ impl Core {
 
     async fn handle_halt(&mut self, block: Block) -> ConsensusResult<()> {
         block.verify(&self.committee)?;
+        // TODO: verify sigma1 and sigma2.
+        ensure!(
+            block.check_sigma1(&self.pk_set) && block.check_sigma2(&self.pk_set),
+            
+        )
 
         let election_state = self.election_states
             .entry((block.epoch, block.view))

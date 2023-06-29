@@ -6,7 +6,7 @@ use ed25519_dalek::Sha512;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashSet, BTreeMap};
 use std::convert::TryInto;
-use std::fmt::{self, Display, write};
+use std::fmt;
 use threshold_crypto::{SignatureShare, PublicKeySet};
 
 #[macro_export]
