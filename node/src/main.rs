@@ -1,7 +1,6 @@
 mod config;
 mod node;
 
-use std::collections::BTreeMap;
 use crate::config::Export as _;
 use crate::config::{Committee, Secret};
 use crate::node::Node;
@@ -15,7 +14,6 @@ use mempool::Committee as MempoolCommittee;
 use threshold_crypto::SecretKeySet;
 use threshold_crypto::serde_impl::SerdeSecret;
 use std::fs;
-use bincode::deserialize;
 use tokio::task::JoinHandle;
 
 #[tokio::main]

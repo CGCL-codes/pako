@@ -6,7 +6,7 @@ use ed25519_dalek::Sha512;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashSet, BTreeMap};
 use std::convert::TryInto;
-use std::fmt;
+use std::fmt::{self, Display, write};
 use threshold_crypto::{SignatureShare, PublicKeySet};
 
 #[macro_export]
@@ -61,6 +61,26 @@ pub enum ConsensusMessage {
     PreVote(PreVote),
     Vote(Vote),
     LoopBack(Block),
+}
+
+impl fmt::Display for ConsensusMessage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, 
+            "ConsensusMessage {{ {} }}",
+            match &self {
+                ConsensusMessage::Val(_) => "VAL",
+                ConsensusMessage::Echo(_) => "ECHO",
+                ConsensusMessage::Finish(_) => "FINISH",
+                ConsensusMessage::Done(_) => "DONE",
+                ConsensusMessage::Halt(_) => "HALT",
+                ConsensusMessage::RandomnessShare(_) => "RANDOMNESS_SHARE",
+                ConsensusMessage::RandomCoin(_) => "RANDOM_COIN",
+                ConsensusMessage::PreVote(_) => "PREVOTE",
+                ConsensusMessage::Vote(_) => "VOTE",
+                ConsensusMessage::LoopBack(_) => "LOOPBACK",
+            }           
+        )
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone)]

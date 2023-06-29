@@ -56,7 +56,7 @@ impl Core {
         let (tx_halt, mut rx_halt): (_, Receiver<(Arc<Mutex<ElectionState>>, Block)>) = channel(10000);
         let (tx_advance, rx_advance): (Sender<Block>, _) = channel(10000);
         tokio::spawn(async move {
-            let mut watermark = 0; // all epochs no larger than watermark are halted.
+            let mut watermark = 0; // all epochs no larger than watermark in `halted` are discarded.
             let mut halted = HashSet::new();
             let mut halts_unhandled = HashMap::<EpochNumber, Vec<Block>>::new();
             let mut waiting = FuturesUnordered::<Pin<Box<dyn Future<Output=RandomCoin> + Send>>>::new();
@@ -79,7 +79,6 @@ impl Core {
                             if let Err(e) = tx_advance.send(verified.clone()).await {
                                 panic!("Failed to send message through advance channel: {}", e);
                             }
-
                             // Output block.
                             if let Err(e) = commit_channel.send(verified.clone()).await {
                                 panic!("Failed to send message through commit channel: {}", e);
@@ -91,7 +90,6 @@ impl Core {
                                     verified.author    
                                 );
                             }
-
                             // Clean up halted.
                             halted.insert(coin.epoch);
                             if halted.remove(&(watermark + 1)) {
@@ -825,19 +823,6 @@ impl Core {
 
         self.halt_channel.send((election_state, block)).await.expect("Failed to send Halt through halt channel.");
 
-        // if block.author == self.get_leader(block.epoch, block.view).await.unwrap() {
-        //     block.verify(&self.committee)?;
-
-        //     // Broadcast halt and output
-        //     let halt = ConsensusMessage::Halt(block.clone());
-        //     self.transmit(halt, None).await?;
-        //     self.output(block.clone()).await?;
-
-        //     // Propose next block.
-        //     let new_block = self.generate_block(block.epoch+1, block.view+1, Proof::Pi(Vec::new())).await?;
-        //     self.spb(new_block).await?;    
-        // }
-
         Ok(())
     }
 
@@ -900,7 +885,12 @@ impl Core {
                     self.spb(new_block).await.expect(&format!("Failed to start spb block of epoch {}", block.epoch));
 
                     // Forward Halt to others.
-                    self.transmit(ConsensusMessage::Halt(block), None).await
+                    self.transmit(ConsensusMessage::Halt(block.clone()), None)
+                        .await.expect(&format!("Failed to forward Halt of epoch {}", block.epoch));
+
+                    // Clean up this epoch.
+                    // self.cleanup_epoch(block).await
+                    Ok(())
                 },
                 else => break,
             };

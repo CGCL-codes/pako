@@ -1,4 +1,4 @@
-use crate::{messages::Proof, config::{EpochNumber, ViewNumber}};
+use crate::{messages::Proof, config::{EpochNumber, ViewNumber}, ConsensusMessage};
 use crypto::{CryptoError, Digest, PublicKey};
 use store::StoreError;
 use thiserror::Error;
@@ -59,8 +59,8 @@ pub enum ConsensusError {
     #[error("Random coin with wrong shares")]
     RandomCoinWithWrongShares,
 
-    #[error("Received more than one vote from {0}")]
-    AuthorityReuseinQC(PublicKey),
+    #[error("Received repeated vote {1} from {0}")]
+    AuthorityReuseinQC(PublicKey, ConsensusMessage),
 
     #[error("Received more than one timeout from {0}")]
     AuthorityReuseinTC(PublicKey),

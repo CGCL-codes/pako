@@ -29,7 +29,7 @@ impl Aggregator {
         // Ensure it is the first time this authority votes.
         ensure!(
             self.used.insert(author),
-            ConsensusError::AuthorityReuseinQC(author)
+            ConsensusError::AuthorityReuseinQC(author, vote)
         );
 
         self.votes.push(vote.clone());
