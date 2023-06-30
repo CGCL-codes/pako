@@ -773,7 +773,7 @@ impl Core {
                     }
                     block.view += 1;
                     self.spb(block).await?;
-                } 
+                }
                 // Mixed `Yes` and `No` votes.
                 else {
                     let sigma1 = votes.iter()
@@ -804,11 +804,11 @@ impl Core {
 
     async fn handle_halt(&mut self, block: Block) -> ConsensusResult<()> {
         block.verify(&self.committee)?;
-        // TODO: verify sigma1 and sigma2.
+
         ensure!(
-            block.check_sigma1(&self.pk_set) && block.check_sigma2(&self.pk_set),
-            
-        )
+            block.check_sigma1(&self.pk_set.public_key()) && block.check_sigma2(&self.pk_set.public_key()),
+            ConsensusError::InvalidVoteProof(block.proof)
+        );
 
         let election_state = self.election_states
             .entry((block.epoch, block.view))
