@@ -501,11 +501,14 @@ impl PreVote {
             },
             PreVoteEnum::No(share) => {
                 let pk_share = pk_set.public_key_share(committee.id(self.author));
-
-                // In `No` prevote, the digest to verify share is simply the digest of PreVote itself.
-                // This is enough to differentiate from digest of `Yes` prevote, which is digest of block.
+                let digest = digest!(
+                    self.epoch.to_le_bytes(),
+                    self.view.to_le_bytes(),
+                    self.leader.0,
+                    "NULL"
+                );
                 ensure!(
-                    pk_share.verify(&share, self.digest()),
+                    pk_share.verify(&share, digest),
                     ConsensusError::InvalidSignatureShare(self.author)
                 );
                 Ok(())
@@ -519,7 +522,7 @@ impl Hash for PreVote {
         digest!(
             self.epoch.to_le_bytes(),
             self.view.to_le_bytes(),
-            self.author.0,
+            self.leader.0,
             "PREVOTE"
         )
     }
@@ -584,22 +587,28 @@ impl Vote {
                 Ok(())
             },
             VoteEnum::No(sig, share) => {
-                // Verify threshold signature from n-f `No` PreVotes.
+                // Verify threshold signature formed out of n-f `No` PreVotes.
                 let digest = digest!(
                     self.epoch.to_le_bytes(),
                     self.view.to_le_bytes(),
                     self.leader.0,
-                    "PREVOTE"
-                );  
+                    "NULL"
+                );
                 ensure!(
                     pk_set.public_key().verify(&sig, digest),
                     ConsensusError::InvalidThresholdSignature(self.author)
                 );
 
                 // Verify sig share.
+                let digest = digest!(
+                    self.epoch.to_le_bytes(),
+                    self.view.to_le_bytes(),
+                    self.leader.0,
+                    "UNLOCK"
+                );
                 let pk_share = pk_set.public_key_share(committee.id(self.author));
                 ensure!(
-                    pk_share.verify(&share, self.digest()),
+                    pk_share.verify(&share, digest),
                     ConsensusError::InvalidSignatureShare(self.author)
                 );
 
@@ -614,7 +623,7 @@ impl Hash for Vote {
         digest!(
             self.epoch.to_le_bytes(),
             self.view.to_le_bytes(),
-            self.author.0,
+            self.leader.0,
             "VOTE"
         )
     }
