@@ -122,7 +122,18 @@ impl Block {
         Self {payload, ..self.clone()}
     }
 
-    pub fn verify(&self, committee: &Committee) -> ConsensusResult<()> {
+    pub fn verify(
+        &self, 
+        committee: &Committee, 
+        halt_mark: EpochNumber, 
+        epochs_halted: &HashSet<EpochNumber>
+    ) -> ConsensusResult<()> {
+        // Discard block with halted epoch number.
+        ensure!(
+            self.epoch > halt_mark && !epochs_halted.contains(&self.epoch),
+            ConsensusError::MessageWithHaltedEpoch(self.epoch, halt_mark+1)
+        );
+
         // Ensure the authority has voting rights.
         let voting_rights = committee.stake(&self.author);
         ensure!(
@@ -238,7 +249,20 @@ impl Echo {
             signature_share,
         }
     }
-    pub fn verify(&self, committee: &Committee, pk_set: &PublicKeySet, leader: PublicKey) -> ConsensusResult<()> {
+    pub fn verify(
+        &self, 
+        committee: &Committee,
+        pk_set: &PublicKeySet, 
+        leader: PublicKey, 
+        halt_mark: EpochNumber, 
+        epochs_halted: &HashSet<EpochNumber>
+    ) -> ConsensusResult<()> {
+        // Check for epoch.
+        ensure!(
+            self.epoch > halt_mark && !epochs_halted.contains(&self.epoch),
+            ConsensusError::MessageWithHaltedEpoch(self.epoch, halt_mark+1)
+        );
+
         // Verify leader.
         ensure!(
             self.block_author == leader,
@@ -298,16 +322,6 @@ impl Hash for Echo {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone)]
-pub struct Lock {
-    // Block digest with PB phase.
-    pub digest: Digest,
-    pub phase: PBPhase,
-
-    // Threshold signature combined by PB leader.
-    pub signature: threshold_crypto::Signature,
-}
-
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Finish(pub Block);
 
@@ -327,6 +341,21 @@ pub struct Done {
     pub epoch: EpochNumber,
     pub view: ViewNumber,
     pub author: PublicKey,
+}
+
+impl Done {
+    pub fn verify(
+        &self,
+        halt_mark: EpochNumber, 
+        epochs_halted: &HashSet<EpochNumber>
+    ) -> ConsensusResult<()> {
+        // Check for epoch.
+        ensure!(
+            self.epoch > halt_mark && !epochs_halted.contains(&self.epoch),
+            ConsensusError::MessageWithHaltedEpoch(self.epoch, halt_mark+1)
+        );
+        Ok(())
+    }
 }
 
 impl Hash for Done {
@@ -371,7 +400,19 @@ impl RandomnessShare {
         }
     }
 
-    pub fn verify(&self, committee: &Committee, pk_set: &PublicKeySet) -> ConsensusResult<()> {
+    pub fn verify(
+        &self, 
+        committee: &Committee, 
+        pk_set: &PublicKeySet, 
+        halt_mark: EpochNumber, 
+        epochs_halted: &HashSet<EpochNumber>
+    ) -> ConsensusResult<()> {
+        // Check for epoch.
+        ensure!(
+            self.epoch > halt_mark && !epochs_halted.contains(&self.epoch),
+            ConsensusError::MessageWithHaltedEpoch(self.epoch, halt_mark+1)
+        );
+
         // Ensure the authority has voting rights.
         ensure!(
             committee.stake(&self.author) > 0,
@@ -413,7 +454,19 @@ pub struct RandomCoin {
 }
 
 impl RandomCoin {
-    pub fn verify(&self, committee: &Committee,  pk_set: &PublicKeySet) -> ConsensusResult<()> {
+    pub fn verify(
+        &self, 
+        committee: &Committee,  
+        pk_set: &PublicKeySet,
+        halt_mark: EpochNumber, 
+        epochs_halted: &HashSet<EpochNumber>
+    ) -> ConsensusResult<()> {
+        // Check for epoch.
+        ensure!(
+            self.epoch > halt_mark && !epochs_halted.contains(&self.epoch),
+            ConsensusError::MessageWithHaltedEpoch(self.epoch, halt_mark+1)
+        );
+
         // Ensure the QC has a quorum.
         let mut weight = 0;
         let mut used = HashSet::new();
@@ -433,7 +486,7 @@ impl RandomCoin {
         let mut sigs = BTreeMap::new();
         // Check the random shares.
         for share in &self.shares {
-            share.verify(committee, pk_set)?;
+            share.verify(committee, pk_set, halt_mark, epochs_halted)?;
             sigs.insert(committee.id(share.author), share.signature_share.clone());
         }
         if let Ok(sig) = pk_set.combine_signatures(sigs.iter()) {
@@ -490,7 +543,20 @@ pub enum PreVoteEnum {
 }
 
 impl PreVote {
-    pub fn verify(&self, committee: &Committee, pk_set: &PublicKeySet) -> ConsensusResult<()> {
+    pub fn verify(
+        &self, 
+        committee: 
+        &Committee, 
+        pk_set: &PublicKeySet,
+        halt_mark: EpochNumber, 
+        epochs_halted: &HashSet<EpochNumber>
+    ) -> ConsensusResult<()> {
+        // Check for epoch.
+        ensure!(
+            self.epoch > halt_mark && !epochs_halted.contains(&self.epoch),
+            ConsensusError::MessageWithHaltedEpoch(self.epoch, halt_mark+1)
+        );
+
         match &self.body {
             PreVoteEnum::Yes(block) => {
                 ensure!(
@@ -568,7 +634,19 @@ pub enum VoteEnum {
 }
 
 impl Vote {
-    pub fn verify(&self, committee: &Committee, pk_set: &PublicKeySet) -> ConsensusResult<()> {
+    pub fn verify(
+        &self, 
+        committee: &Committee, 
+        pk_set: &PublicKeySet,
+        halt_mark: EpochNumber, 
+        epochs_halted: &HashSet<EpochNumber>
+    ) -> ConsensusResult<()> {
+        // Check for epoch.
+        ensure!(
+            self.epoch > halt_mark && !epochs_halted.contains(&self.epoch),
+            ConsensusError::MessageWithHaltedEpoch(self.epoch, halt_mark+1)
+        );
+        
         match &self.body {
             VoteEnum::Yes(block, share) => {
                 // Verify sigma1.
@@ -631,7 +709,7 @@ impl Hash for Vote {
 
 impl fmt::Debug for Vote {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
-        write!(f, "PreVote (author {}, epoch {}, view {}, leader {}, body {})", 
+        write!(f, "Vote (author {}, epoch {}, view {}, leader {}, body {})", 
             self.author,
             self.epoch,
             self.view, 

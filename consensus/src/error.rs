@@ -1,4 +1,4 @@
-use crate::{messages::Proof, config::{EpochNumber, ViewNumber}, ConsensusMessage};
+use crate::{messages::Proof, config::{EpochNumber, ViewNumber}, ConsensusMessage, Block};
 use crypto::{CryptoError, Digest, PublicKey};
 use store::StoreError;
 use thiserror::Error;
@@ -38,8 +38,8 @@ pub enum ConsensusError {
     #[error("Node {0} is not in the committee")]
     NotInCommittee(PublicKey),
 
-    #[error("Invalid epoch {0} or view {1}")]
-    InvalidEpochOrView(EpochNumber, ViewNumber),
+    #[error("Consensus message with halted epoch: {0}, currently lowest epoch not halted: {1}")]
+    MessageWithHaltedEpoch(EpochNumber, EpochNumber),
 
     #[error("Invalid vote proof")]
     InvalidVoteProof(Proof),
