@@ -9,7 +9,6 @@ use log::info;
 use network::{NetReceiver, NetSender};
 use store::Store;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
-// use tokio::time::{Duration, sleep};
 use threshold_crypto::PublicKeySet;
 
 #[cfg(test)]

@@ -1,4 +1,4 @@
-use crate::{messages::Proof, config::{EpochNumber, ViewNumber}, ConsensusMessage, Block};
+use crate::{messages::Proof, config::{EpochNumber, ViewNumber}, ConsensusMessage};
 use crypto::{CryptoError, Digest, PublicKey};
 use store::StoreError;
 use thiserror::Error;

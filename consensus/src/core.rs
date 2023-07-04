@@ -213,7 +213,7 @@ impl Core {
 
     async fn pb(&mut self, block: &Block) -> ConsensusResult<()> {
         // Update proof of the block of the node's own.
-        self.update_block(block.without_payload());
+        self.update_block(block.clone());
 
         // Collect the node's own echo.
         let echo = Echo::new(block.digest(), 
@@ -250,15 +250,8 @@ impl Core {
 
         let phase = match &block.proof {
             Proof::Pi(_) => {
-                // In PB phase 1, wait until all payloads arrived.
-                // The `verify` method of mempool will automatically sync
-                // missing payloads.
-                if !self.mempool_driver.verify(block.clone()).await? {
-                    return Ok(());
-                }
-
                 self.store(&block).await;
-                self.update_block(block.without_payload());
+                self.update_block(block.clone());
                 PBPhase::Phase1
             },
             Proof::Sigma(_, _) => {
@@ -356,7 +349,7 @@ impl Core {
 
     async fn finish(&mut self, block: &Block) -> ConsensusResult<()> {
         // Update proof of the block of the node's own.
-        self.update_block(block.without_payload());
+        self.update_block(block.clone());
         
         // Collect the node's own finish.
         let finish = Finish(block.clone());
@@ -825,8 +818,7 @@ impl Core {
 
     async fn output(&mut self, block: Block) -> ConsensusResult<()> {
         // Output block with payloads.
-        let full_block = self.read(&block.digest()).await?;
-        if let Err(e) = self.commit_channel.send(full_block).await {
+        if let Err(e) = self.commit_channel.send(block.clone()).await {
             panic!("Failed to send message through commit channel: {}", e);
         } else {
             info!("Commit block {} of member {} in epoch {}, view {}", 
@@ -880,7 +872,6 @@ impl Core {
                         ConsensusMessage::RandomCoin(coin) => self.handle_random_coin(coin).await,
                         ConsensusMessage::PreVote(prevote) => self.handle_prevote(&prevote).await,
                         ConsensusMessage::Vote(vote) => self.handle_vote(vote).await,
-                        ConsensusMessage::LoopBack(block) => self.cleanup_epoch(block).await,
                     }
                 },
                 Some(block) = self.advance_channel.recv() => {                    

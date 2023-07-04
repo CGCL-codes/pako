@@ -11,7 +11,7 @@ use threshold_crypto::{SignatureShare, PublicKeySet};
 
 #[macro_export]
 macro_rules! digest {
-    ($($x: expr), +) => {
+    ($($x: expr),+) => {
         {
             let mut hasher = Sha512::new();
             $(
@@ -55,12 +55,11 @@ pub enum ConsensusMessage {
     Echo(Echo),
     Finish(Finish),
     Done(Done),
-    Halt(Block),    // Need to compare leader of round <epoch, view> with the block leader.
+    Halt(Block),
     RandomnessShare(RandomnessShare),
     RandomCoin(RandomCoin),
     PreVote(PreVote),
     Vote(Vote),
-    LoopBack(Block),
 }
 
 impl fmt::Display for ConsensusMessage {
@@ -77,7 +76,6 @@ impl fmt::Display for ConsensusMessage {
                 ConsensusMessage::RandomCoin(_) => "RANDOM_COIN",
                 ConsensusMessage::PreVote(_) => "PREVOTE",
                 ConsensusMessage::Vote(_) => "VOTE",
-                ConsensusMessage::LoopBack(_) => "LOOPBACK",
             }           
         )
     }
@@ -116,12 +114,6 @@ impl Block {
         Self { signature, ..block }
     }
 
-    // Use block without payload to accelerate consensus procedure.
-    pub fn without_payload(&self) -> Self {
-        let payload = Vec::<Digest>::new();
-        Self {payload, ..self.clone()}
-    }
-
     pub fn verify(
         &self, 
         committee: &Committee, 
@@ -142,8 +134,8 @@ impl Block {
         );
 
         // Check signature.
-        // Use digest of block in PBPhase1.
-        let mut mocked = self.without_payload(); 
+        // Use the digest of block used to be sent during PBPhase1.
+        let mut mocked = self.clone(); 
         mocked.proof = Proof::Pi(Vec::new());
         self.signature.verify(&mocked.digest(), &self.author)?;
 
@@ -152,8 +144,8 @@ impl Block {
 
     pub fn check_sigma1(&self, pk: &threshold_crypto::PublicKey) -> bool {
         if let Proof::Sigma(Some(sigma1), _) = &self.proof {
-            // To verify sigma1 we should use digest of block in PBPhase1.
-            let mut mocked = self.without_payload();
+            // To verify sigma1 we should use digest of block of PBPhase1's state.
+            let mut mocked = self.clone();
             mocked.proof = Proof::Pi(Vec::new());
             return pk.verify(&sigma1, mocked.digest())
         }
@@ -169,22 +161,17 @@ impl Block {
 }
 
 impl Hash for Block {
-    // Form a complete digest of the block,
-    // denote as <ID, R, l, 1 or 2> in original paper,
-    // where ID is the identifier of current MVBA instance, here we
-    // use epoch. R equals view number, l corresponds to the broadcaster
-    // of the SPB instance, 1 or 2 indicates PB phase 1 or 2.
     fn digest(&self) -> Digest {
-        digest!(
-            self.author.0,
-            self.epoch.to_le_bytes(),
-            self.view.to_le_bytes(),
-            match &self.proof {
-                Proof::Pi(_) => &[0],
-                Proof::Sigma(_, _) => &[1],
-            },
-            "BLOCK"
-        )
+        let mut hasher = Sha512::new();
+        hasher.update(self.author.0);
+        hasher.update(self.epoch.to_le_bytes());
+        hasher.update(self.view.to_le_bytes());
+        self.payload.iter().for_each(|p| hasher.update(p));
+        hasher.update(match &self.proof {
+            Proof::Pi(_) => &[0],
+            Proof::Sigma(_, _) => &[1],
+        });
+        Digest(hasher.finalize().as_slice()[..32].try_into().unwrap())
     }
 }
 
