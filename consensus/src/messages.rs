@@ -646,7 +646,7 @@ impl Vote {
             self.epoch > halt_mark && !epochs_halted.contains(&self.epoch),
             ConsensusError::MessageWithHaltedEpoch(self.epoch, halt_mark+1)
         );
-        
+
         match &self.body {
             VoteEnum::Yes(block, share) => {
                 // Verify sigma1.

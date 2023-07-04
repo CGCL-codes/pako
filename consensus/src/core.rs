@@ -33,6 +33,7 @@ pub struct Core {
     core_channel: Receiver<ConsensusMessage>,
     halt_channel: Sender<(Arc<Mutex<ElectionState>>, Block)>, // handle halts
     advance_channel: Receiver<Block>, // propose block for next epoch
+    commit_channel: Sender<Block>,
 
     votes_aggregators: HashMap<(EpochNumber, Digest), Aggregator>, // n-f votes collector
     election_states: HashMap<(EpochNumber, ViewNumber), Arc<Mutex<ElectionState>>>, // stores states of leader election and block delivery
@@ -84,17 +85,6 @@ impl Core {
                             if let Err(e) = tx_advance.send(verified.clone()).await {
                                 panic!("Failed to send message through advance channel: {}", e);
                             }
-                            // Output block.
-                            if let Err(e) = commit_channel.send(verified.clone()).await {
-                                panic!("Failed to send message through commit channel: {}", e);
-                            } else {
-                                info!("Commit block {} of member {} in epoch {}, view {}", 
-                                    verified.digest(),
-                                    verified.author,
-                                    verified.epoch,
-                                    verified.view,    
-                                );
-                            }
                             // Clean up halted.
                             epochs_halted.insert(coin.epoch);
                             if epochs_halted.remove(&(halt_mark + 1)) {
@@ -118,6 +108,7 @@ impl Core {
             mempool_driver,
             network_filter,
             core_channel,
+            commit_channel,
             halt_channel: tx_halt,
             advance_channel: rx_advance,
             votes_aggregators: HashMap::new(),
@@ -259,6 +250,13 @@ impl Core {
 
         let phase = match &block.proof {
             Proof::Pi(_) => {
+                // In PB phase 1, wait until all payloads arrived.
+                // The `verify` method of mempool will automatically sync
+                // missing payloads.
+                if !self.mempool_driver.verify(block.clone()).await? {
+                    return Ok(());
+                }
+
                 self.store(&block).await;
                 self.update_block(block.without_payload());
                 PBPhase::Phase1
@@ -501,9 +499,9 @@ impl Core {
 
                 // Combine shares into a complete signature.
                 let share_map = shares.iter()
-                    .map(|s| (self.committee.id(s.author), s.signature_share.clone()))
+                    .map(|s| (self.committee.id(s.author), &s.signature_share))
                     .collect::<BTreeMap<_, _>>();
-                let threshold_signature = self.pk_set.combine_signatures(&share_map).expect("Unqualified shares!");
+                let threshold_signature = self.pk_set.combine_signatures(share_map).expect("Unqualified shares!");
 
                 // Use coin to elect leader. 
                 let id = usize::from_be_bytes((&threshold_signature.to_bytes()[0..8]).try_into().unwrap()) % self.committee.size();
@@ -667,22 +665,21 @@ impl Core {
 
                     // Else broadcast `No` Vote.
                     None => {
-                        let shares: Vec<_> = prevotes.into_iter()
+                        let shares: BTreeMap<_, _> = prevotes.into_iter()
                             .filter_map(|prevote| {
                                 match prevote {
-                                    ConsensusMessage::PreVote(prevote) => Some(prevote.body),
+                                    ConsensusMessage::PreVote(prevote) => Some(prevote),
                                     _ => None,
                                 }
                             })
-                            .filter_map(|e| {
-                                match e {
-                                    PreVoteEnum::No(share) => Some(share),
+                            .filter_map(|prevote| {
+                                match prevote.body {
+                                    PreVoteEnum::No(share) => Some((self.committee.id(prevote.author), share)),
                                     _ => None,
                                 }
                             })
                             .collect();
-                        let shares: BTreeMap<_, _> = (0..shares.len()).map(|i| (i, shares.get(i).unwrap())).collect();
-                        let threshold_signature = self.pk_set.combine_signatures(shares).expect("not enough qualified shares");
+                        let threshold_signature = self.pk_set.combine_signatures(&shares).expect("not enough qualified shares");
 
                         let digest = digest!(
                             prevote.epoch.to_le_bytes(),
@@ -743,12 +740,11 @@ impl Core {
 
                 // n-f `Yes` votes.
                 if votes.iter().all(|vote| matches!(vote.body, VoteEnum::Yes(_, _))) {
-                    let shares: Vec<_> = votes.iter()
+                    let shares: BTreeMap<_, _> = votes.iter()
                         .filter_map(|vote| match &vote.body {
-                            VoteEnum::Yes(_, share) => Some(share.clone()),
+                            VoteEnum::Yes(_, share) => Some((self.committee.id(vote.author), share)),
                             _ => None,
                         }).collect();
-                    let shares: BTreeMap<_, _> = (0..shares.len()).map(|i| (i, shares.get(i).unwrap())).collect();
                     let sigma2 = self.pk_set.combine_signatures(shares).expect("not enough qualified shares");
                     
                     // Add sigma2 and halt.
@@ -762,19 +758,21 @@ impl Core {
                 } 
                 // n-f `No` votes.
                 else if votes.iter().all(|vote| matches!(vote.body, VoteEnum::No(_, _))) {
-                    let shares: Vec<_> = votes.iter()
+                    let shares: BTreeMap<_, _> = votes.iter()
                         .filter_map(|vote| match &vote.body {
-                            VoteEnum::No(_, share) => Some(share.clone()),
+                            VoteEnum::No(_, share) => Some((self.committee.id(vote.author), share)),
                             _ => None,
                         }).collect();
-                    let shares_map: BTreeMap<_, _> = (0..shares.len()).map(|i| (i, shares.get(i).unwrap())).collect();
-                    let quorum_for_null = self.pk_set.combine_signatures(shares_map).expect("not enough qualified shares");
+                    let quorum_for_null = self.pk_set.combine_signatures(shares).expect("not enough qualified shares");
                     
                     // Broadcast the same block in new round, except updated pi and view.
                     let pi = (false, vote.view, quorum_for_null);
                     let mut block = self.get_block(self.name, vote.epoch, vote.view).unwrap().clone();
+
+                    // Update block and start SPB of next view.
                     block.proof = Proof::Pi(vec![pi]);
                     block.view += 1;
+                    block.signature = self.signature_service.request_signature(block.digest()).await;
                     self.spb(block).await?;
                 }
                 // Mixed `Yes` and `No` votes.
@@ -795,8 +793,10 @@ impl Core {
                     // Broadcast the leader's block in next round.
                     let pi = (true, vote.view, sigma1.as_ref().unwrap().clone());
                     let mut block = self.get_block(self.name, vote.epoch, vote.view).unwrap().clone();
+
                     block.proof = Proof::Pi(vec![pi]);
                     block.view += 1;
+                    block.signature = self.signature_service.request_signature(block.digest()).await;
                     self.spb(block).await?;
                 }
 
@@ -824,8 +824,17 @@ impl Core {
     }
 
     async fn output(&mut self, block: Block) -> ConsensusResult<()> {
-        if !self.mempool_driver.verify(block.clone()).await? {
-            return Ok(());
+        // Output block with payloads.
+        let full_block = self.read(&block.digest()).await?;
+        if let Err(e) = self.commit_channel.send(full_block).await {
+            panic!("Failed to send message through commit channel: {}", e);
+        } else {
+            info!("Commit block {} of member {} in epoch {}, view {}", 
+                block.digest(),
+                block.author,
+                block.epoch,
+                block.view,    
+            );
         }
 
         // Clean up mempool.
@@ -845,8 +854,8 @@ impl Core {
         self.votes_aggregators.retain(|&(e, _), _| e != block.epoch);
         self.election_states.retain(|&(e, _), _| e != block.epoch);
 
-        // TODO: Clean up payloads.
-        // self.mempool_driver.cleanup_async(&block).await;
+        // Clean up payloads.
+        self.mempool_driver.cleanup_async(&block).await;
 
         Ok(())
     }
@@ -884,7 +893,7 @@ impl Core {
                         .expect(&format!("Failed to forward Halt of epoch {}", block.epoch));
 
                     // Clean up this epoch.
-                    self.cleanup_epoch(block).await
+                    self.output(block).await
                 },
                 else => break,
             };
