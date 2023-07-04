@@ -204,6 +204,7 @@ pub struct Echo {
     // Block info.
     pub block_digest: Digest,
     pub block_author: PublicKey,
+    pub block: Option<Block>,
     pub phase: PBPhase,
 
     // Echo info.
@@ -219,6 +220,7 @@ impl Echo {
     pub async fn new(
         block_digest: Digest, 
         block_author: PublicKey,
+        block: Option<Block>,
         phase: PBPhase, 
         epoch: EpochNumber,
         view: ViewNumber,
@@ -229,6 +231,7 @@ impl Echo {
         Self {
             block_digest,
             block_author,
+            block,
             phase,
             epoch,
             view,
@@ -241,6 +244,7 @@ impl Echo {
         committee: &Committee,
         pk_set: &PublicKeySet, 
         leader: PublicKey, 
+        optimistic_leader: PublicKey,
         halt_mark: EpochNumber, 
         epochs_halted: &HashSet<EpochNumber>
     ) -> ConsensusResult<()> {
@@ -252,7 +256,7 @@ impl Echo {
 
         // Verify leader.
         ensure!(
-            self.block_author == leader,
+            self.block_author == leader || self.block_author == optimistic_leader,
             ConsensusError::WrongLeader {
                 digest: self.block_digest.clone(),
                 leader: self.block_author,
@@ -438,6 +442,7 @@ pub struct RandomCoin {
     pub view: ViewNumber, // view
     pub leader: PublicKey,  // elected leader of the view
     pub shares: Vec<RandomnessShare>,
+    pub is_fallback: bool,
 }
 
 impl RandomCoin {
@@ -532,8 +537,7 @@ pub enum PreVoteEnum {
 impl PreVote {
     pub fn verify(
         &self, 
-        committee: 
-        &Committee, 
+        committee: &Committee, 
         pk_set: &PublicKeySet,
         halt_mark: EpochNumber, 
         epochs_halted: &HashSet<EpochNumber>

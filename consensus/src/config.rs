@@ -78,6 +78,11 @@ impl Committee {
         self.authorities.get(&name).unwrap().id
     }
 
+    pub fn get_public_key(&self, id: usize) -> Option<PublicKey> {
+        self.authorities.values()
+            .find_map(|a| if a.id == id { Some(a.name) } else { None })
+    }
+
     pub fn quorum_threshold(&self) -> Stake {
         // If N = 3f + 1 + k (0 <= k < 3)
         // then (2 N + 3) / 3 = 2f + 1 + (2k + 2)/3 = 2f + 1 + k = N - f

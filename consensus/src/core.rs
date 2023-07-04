@@ -192,6 +192,12 @@ impl Core {
         ).await
     }
 
+    fn get_optimistic_leader(&self, epoch: EpochNumber) -> PublicKey {
+        self.committee
+            .get_public_key(epoch as usize % self.committee.size())
+            .unwrap()
+    } 
+
     // Starts the SPB phase.
     async fn spb(&mut self, block: Block) -> ConsensusResult<()> {
         debug!("Processing {:?}", block);
@@ -268,7 +274,9 @@ impl Core {
             phase, 
             block.epoch,
             block.view,
-            self.signature_service.clone()).await
+            self.signature_service.clone(),
+            self.get_optimistic_leader(block.epoch) == block.author
+        ).await
     }
 
     async fn echo(&self, 
@@ -277,7 +285,9 @@ impl Core {
         phase: PBPhase, 
         epoch: EpochNumber,
         view: ViewNumber,
-        signature_service: SignatureService) -> ConsensusResult<()> {
+        signature_service: SignatureService,
+        is_optimistic: bool
+    ) -> ConsensusResult<()> {
 
         let echo = Echo::new(block_digest, 
             block_author.clone(), 
@@ -285,17 +295,25 @@ impl Core {
             epoch,
             view, 
             self.name, 
-            signature_service).await;
-
-        // Send ECHO to block author.
+            signature_service
+        ).await;
         let message = ConsensusMessage::Echo(echo);
-        self.transmit(message, Some(block_author)).await?;
+
+        // Broacast Echo if it's against block of optimistic leader,
+        // else send Echo back to the block author.
+        self.transmit(message, (!is_optimistic).then(|| block_author)).await?;
 
         Ok(())
     }
 
     async fn handle_echo(&mut self, echo: &Echo) -> ConsensusResult<()> {
-        echo.verify(&self.committee, &self.pk_set, self.name, self.halt_mark, &self.epochs_halted)?;
+        echo.verify(
+            &self.committee, 
+            &self.pk_set, 
+            self.name,
+            self.get_optimistic_leader(echo.epoch), 
+            self.halt_mark, 
+            &self.epochs_halted)?;
 
         self.votes_aggregators
             .entry((echo.epoch, echo.digest()))
