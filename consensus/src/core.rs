@@ -224,11 +224,12 @@ impl Core {
         // Collect the node's own echo.
         let echo = Echo::new(block.digest(), 
             block.author, 
+            (block.author == self.get_optimistic_leader(block.epoch)).then(|| block.clone()),
             match &block.proof {
                 Proof::Pi(_) => PBPhase::Phase1,
                 Proof::Sigma(_, _) => PBPhase::Phase2,
             },
-            block.epoch,
+            block.epoch, 
             block.view, 
             self.name, 
             self.signature_service.clone()).await;
@@ -269,19 +270,22 @@ impl Core {
         };
 
         // Send echo msg.
+        let is_optimistic = self.get_optimistic_leader(block.epoch) == block.author;
         self.echo(block.digest(), 
             &block.author, 
+            is_optimistic.then(|| block.clone()),
             phase, 
             block.epoch,
             block.view,
             self.signature_service.clone(),
-            self.get_optimistic_leader(block.epoch) == block.author
+            is_optimistic
         ).await
     }
 
     async fn echo(&self, 
         block_digest: Digest,
         block_author: &PublicKey, 
+        block: Option<Block>,
         phase: PBPhase, 
         epoch: EpochNumber,
         view: ViewNumber,
@@ -291,6 +295,7 @@ impl Core {
 
         let echo = Echo::new(block_digest, 
             block_author.clone(), 
+            block,
             phase,
             epoch,
             view, 
@@ -343,18 +348,44 @@ impl Core {
                     .collect();
 
                 let threshold_signature = self.pk_set.combine_signatures(&shares).expect("not enough qualified shares");
-                let mut block = self.get_block(echo.block_author, echo.epoch, echo.view).unwrap().clone();
+                
+                let mut block = match &echo.block {
+                    Some(block) => block.clone(),
+                    None => self.get_block(echo.block_author, echo.epoch, echo.view).unwrap().clone(),
+                };
+
                 match echo.phase {
+                    // Update proof with sigma1 and start PB of phase 2.
                     PBPhase::Phase1 => {
-                        // Update proof and start PB of phase 2.
                         block.proof = Proof::Sigma(Some(threshold_signature), None);
-                        self.pb(&block).await
+                        match &echo.block {
+                            // Broadcast block of optimistic leader with sigma1.
+                            Some(block) => self.echo(
+                                block.digest(), 
+                                &block.author, 
+                                Some(block.clone()), 
+                                PBPhase::Phase2, 
+                                block.epoch, 
+                                block.view, 
+                                self.signature_service.clone(), 
+                                true
+                            ).await,
+                            // Broadcast the node's own block with sigma1.
+                            None => self.pb(&block).await
+                        }
                     },
+                    // Update proof with sigma2.
                     PBPhase::Phase2 => {
-                        // Finish SPB, update proof with sigma2 and broadcast Finish.
                         if let Proof::Sigma(sigma1, _) = block.proof {
-                            block.proof = Proof::Sigma(sigma1, Some(threshold_signature));            
-                            self.finish(&block).await
+                            block.proof = Proof::Sigma(sigma1, Some(threshold_signature));     
+                            match &echo.block {
+                                // Halt from optimistic path.
+                                Some(block) => {
+                                    self.handle_halt(block.clone()).await
+                                },
+                                // Finish SPB.
+                                None => self.finish(&block).await
+                            }       
                         } else {
                             return Err(ConsensusError::InvalidThresholdSignature(block.author));
                         }

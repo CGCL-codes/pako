@@ -256,7 +256,8 @@ impl Echo {
 
         // Verify leader.
         ensure!(
-            self.block_author == leader || self.block_author == optimistic_leader,
+            (self.block_author == leader || self.block_author == optimistic_leader) &&
+                self.block.map_or(true, |b| b.author == self.block_author),
             ConsensusError::WrongLeader {
                 digest: self.block_digest.clone(),
                 leader: self.block_author,
@@ -265,6 +266,9 @@ impl Echo {
                 view: self.view,
             }
         );
+
+        // Verify block.
+        self.block.map_or_else(|| Ok(()), |b| b.verify(committee, halt_mark, epochs_halted))?;
 
         // Ensure the authority has voting rights.
         ensure!(
