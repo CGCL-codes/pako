@@ -278,24 +278,23 @@ impl Core {
             block.epoch,
             block.view,
             self.signature_service.clone(),
-            is_optimistic
         ).await
     }
 
-    async fn echo(&self, 
+    async fn echo(&mut self, 
         block_digest: Digest,
         block_author: &PublicKey, 
-        block: Option<Block>,
+        optimistic_block: Option<Block>,
         phase: PBPhase, 
         epoch: EpochNumber,
         view: ViewNumber,
         signature_service: SignatureService,
-        is_optimistic: bool
     ) -> ConsensusResult<()> {
-
+        // Broacast Echo if it's against block of optimistic leader,
+        // else send Echo back to the block author.
         let echo = Echo::new(block_digest, 
             block_author.clone(), 
-            block,
+            optimistic_block.clone(),
             phase,
             epoch,
             view, 
@@ -303,10 +302,12 @@ impl Core {
             signature_service
         ).await;
         let message = ConsensusMessage::Echo(echo);
+        self.transmit(message, optimistic_block.is_none().then(|| block_author)).await?;
 
-        // Broacast Echo if it's against block of optimistic leader,
-        // else send Echo back to the block author.
-        self.transmit(message, (!is_optimistic).then(|| block_author)).await?;
+        // Update block of optimistic leader in PB phase 2.
+        if let PBPhase::Phase2 = phase {
+            optimistic_block.map(|b| self.update_block(b));
+        }
 
         Ok(())
     }
@@ -349,7 +350,7 @@ impl Core {
 
                 let threshold_signature = self.pk_set.combine_signatures(&shares).expect("not enough qualified shares");
                 
-                let mut block = match &echo.block {
+                let mut block = match &echo.optimistic_block {
                     Some(block) => block.clone(),
                     None => self.get_block(echo.block_author, echo.epoch, echo.view).unwrap().clone(),
                 };
@@ -358,7 +359,7 @@ impl Core {
                     // Update proof with sigma1 and start PB of phase 2.
                     PBPhase::Phase1 => {
                         block.proof = Proof::Sigma(Some(threshold_signature), None);
-                        match &echo.block {
+                        match &echo.optimistic_block {
                             // Broadcast block of optimistic leader with sigma1.
                             Some(block) => self.echo(
                                 block.digest(), 
@@ -368,7 +369,6 @@ impl Core {
                                 block.epoch, 
                                 block.view, 
                                 self.signature_service.clone(), 
-                                true
                             ).await,
                             // Broadcast the node's own block with sigma1.
                             None => self.pb(&block).await
@@ -378,7 +378,7 @@ impl Core {
                     PBPhase::Phase2 => {
                         if let Proof::Sigma(sigma1, _) = block.proof {
                             block.proof = Proof::Sigma(sigma1, Some(threshold_signature));     
-                            match &echo.block {
+                            match &echo.optimistic_block {
                                 // Halt from optimistic path.
                                 Some(block) => {
                                     self.handle_halt(block.clone()).await
@@ -426,62 +426,33 @@ impl Core {
             .or_insert_with(|| Aggregator::new())
             .append(finish.0.author, ConsensusMessage::Finish(finish.clone()), self.committee.stake(&finish.0.author))?;
 
+        // Since the optimistic leader won't broadcast its Finish, minus quorum threshold by 1. 
         let finishes = self.votes_aggregators
             .get_mut(&(finish.0.epoch, finish.digest()))
             .unwrap()
-            .take(self.committee.quorum_threshold());
+            .take(self.committee.quorum_threshold() - 1);
 
         match finishes {
             None => Ok(()),
 
-            // Broadcast Done if received n-f Finish.
             Some(_) => {
-                self.done(finish.0.epoch, finish.0.view).await
-            },
-        }
-    }
+                let optimistic_sigma1 = match self.get_block(
+                        self.get_optimistic_leader(finish.0.epoch), 
+                        finish.0.epoch, 
+                        finish.0.view
+                    ) {
+                        Some(block) => match &block.proof {
+                            Proof::Sigma(_, _) => Some(block.clone()),
+                            _ => None,
+                        },
+                        _ => None,
+                    };
 
-    async fn done(&mut self, epoch: EpochNumber, view: ViewNumber) -> ConsensusResult<()> {
-        let done = Done {
-            epoch,
-            view,
-            author: self.name,
-        };
-
-        // Collect the node's own done.
-        self.votes_aggregators
-            .entry((done.epoch, done.digest()))
-            .or_insert_with(|| Aggregator::new())
-            .append(done.author, ConsensusMessage::Done(done.clone()), self.committee.stake(&done.author))?;
-
-        let message = ConsensusMessage::Done(done);
-        self.transmit(message, None).await?;
-
-        Ok(())
-    }
-
-    async fn handle_done(&mut self, done: &Done) -> ConsensusResult<()> {
-        done.verify(self.halt_mark, &self.epochs_halted)?;
-
-        self.votes_aggregators
-            .entry((done.epoch, done.digest()))
-            .or_insert_with(|| Aggregator::new())
-            .append(done.author, ConsensusMessage::Done(done.clone()), self.committee.stake(&done.author))?;
-
-        let msgs = self.votes_aggregators
-        .get_mut(&(done.epoch, done.digest()))
-        .unwrap()
-        .take(self.committee.random_coin_threshold());
-
-        match msgs {
-            None => (),
-
-            // f+1 Done to enter leader election phase.
-            Some(_) => {
                 let randomness_share = RandomnessShare::new(
-                    done.epoch,
-                    done.view, 
+                    finish.0.epoch,
+                    finish.0.view, 
                     self.name, 
+                    optimistic_sigma1,
                     self.signature_service.clone()
                 ).await;
 
@@ -494,19 +465,9 @@ impl Core {
                         self.committee.stake(&randomness_share.author))?;
 
                 let message = ConsensusMessage::RandomnessShare(randomness_share.clone());
-                self.transmit(message, None).await?;
+                self.transmit(message, None).await
             },
         }
-
-        if let Some(aggregator) = self.votes_aggregators.get(&(done.epoch, done.digest())) {
-            if aggregator.weight == self.committee.quorum_threshold() {
-                // TODO: After collecting n-f Done, abandon the rest SPB instances.
-                // This can be done by set a mutex-free bool flag indicating whether n-f done have been collected.
-                // In fact, the async/await strcuture of mvba protocol is sufficently fast to neglect actively abandoning.
-            }
-        }
-
-        Ok(())
     }
 
     async fn handle_randommess_share(&mut self, randomness_share: &RandomnessShare) -> ConsensusResult<()> {
@@ -519,11 +480,12 @@ impl Core {
             .append(randomness_share.author, 
                 ConsensusMessage::RandomnessShare(randomness_share.clone()), 
                 self.committee.stake(&randomness_share.author))?;
-
+        
+        // n-f randomness shares to reveal fallback leader. 
         let shares = self.votes_aggregators
             .get_mut(&(randomness_share.epoch, randomness_share.digest()))
             .unwrap()
-            .take(self.committee.random_coin_threshold());
+            .take(self.committee.quorum_threshold());
 
         match shares {
             // Votes not enough.
@@ -538,6 +500,10 @@ impl Core {
                         }
                     })
                     .collect();
+
+                // Invoke ABA, vote for 1 if among shares there is at least one containing valid sigma1 
+                // of the optimistic block, otherwise 0.
+                
 
                 // Combine shares into a complete signature.
                 let share_map = shares.iter()
@@ -916,7 +882,6 @@ impl Core {
                         ConsensusMessage::Echo(echo) => self.handle_echo(&echo).await,
                         ConsensusMessage::Finish(finish) => self.handle_finish(&finish).await,
                         ConsensusMessage::Halt(block) => self.handle_halt(block).await,
-                        ConsensusMessage::Done(done) => self.handle_done(&done).await,
                         ConsensusMessage::RandomnessShare(randomness_share) => self.handle_randommess_share(&randomness_share).await,
                         ConsensusMessage::RandomCoin(coin) => self.handle_random_coin(coin).await,
                         ConsensusMessage::PreVote(prevote) => self.handle_prevote(&prevote).await,

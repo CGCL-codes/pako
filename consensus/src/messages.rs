@@ -54,7 +54,6 @@ pub enum ConsensusMessage {
     Val(Block),
     Echo(Echo),
     Finish(Finish),
-    Done(Done),
     Halt(Block),
     RandomnessShare(RandomnessShare),
     RandomCoin(RandomCoin),
@@ -70,7 +69,6 @@ impl fmt::Display for ConsensusMessage {
                 ConsensusMessage::Val(_) => "VAL",
                 ConsensusMessage::Echo(_) => "ECHO",
                 ConsensusMessage::Finish(_) => "FINISH",
-                ConsensusMessage::Done(_) => "DONE",
                 ConsensusMessage::Halt(_) => "HALT",
                 ConsensusMessage::RandomnessShare(_) => "RANDOMNESS_SHARE",
                 ConsensusMessage::RandomCoin(_) => "RANDOM_COIN",
@@ -204,7 +202,7 @@ pub struct Echo {
     // Block info.
     pub block_digest: Digest,
     pub block_author: PublicKey,
-    pub block: Option<Block>,
+    pub optimistic_block: Option<Block>,
     pub phase: PBPhase,
 
     // Echo info.
@@ -220,7 +218,7 @@ impl Echo {
     pub async fn new(
         block_digest: Digest, 
         block_author: PublicKey,
-        block: Option<Block>,
+        optimistic_block: Option<Block>,
         phase: PBPhase, 
         epoch: EpochNumber,
         view: ViewNumber,
@@ -231,7 +229,7 @@ impl Echo {
         Self {
             block_digest,
             block_author,
-            block,
+            optimistic_block,
             phase,
             epoch,
             view,
@@ -257,7 +255,7 @@ impl Echo {
         // Verify leader.
         ensure!(
             (self.block_author == leader || self.block_author == optimistic_leader) &&
-                self.block.map_or(true, |b| b.author == self.block_author),
+                self.optimistic_block.as_ref().map_or(true, |b| b.author == self.block_author),
             ConsensusError::WrongLeader {
                 digest: self.block_digest.clone(),
                 leader: self.block_author,
@@ -268,7 +266,8 @@ impl Echo {
         );
 
         // Verify block.
-        self.block.map_or_else(|| Ok(()), |b| b.verify(committee, halt_mark, epochs_halted))?;
+        self.optimistic_block.as_ref()
+            .map_or_else(|| Ok(()), |b| b.verify(committee, halt_mark, epochs_halted))?;
 
         // Ensure the authority has voting rights.
         ensure!(
@@ -331,51 +330,13 @@ impl Hash for Finish {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone)]
-pub struct Done {
-    pub epoch: EpochNumber,
-    pub view: ViewNumber,
-    pub author: PublicKey,
-}
-
-impl Done {
-    pub fn verify(
-        &self,
-        halt_mark: EpochNumber, 
-        epochs_halted: &HashSet<EpochNumber>
-    ) -> ConsensusResult<()> {
-        // Check for epoch.
-        ensure!(
-            self.epoch > halt_mark && !epochs_halted.contains(&self.epoch),
-            ConsensusError::MessageWithHaltedEpoch(self.epoch, halt_mark+1)
-        );
-        Ok(())
-    }
-}
-
-impl Hash for Done {
-    fn digest(&self) -> Digest {
-        // Done is distinguished by <epoch, view, Done>,
-        digest!(
-            self.epoch.to_le_bytes(),
-            self.view.to_le_bytes(),
-            "DONE"
-        )
-    }
-}
-
-impl fmt::Debug for Done {
-    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
-        write!(f, "Done (author {}, epoch {}, view {})", self.author, self.epoch, self.view)
-    }
-}
-
 #[derive(Clone, Serialize, Deserialize)]
 pub struct RandomnessShare {
     pub epoch: EpochNumber, // eopch
     pub view: ViewNumber, // view
     pub author: PublicKey,
     pub signature_share: SignatureShare,
+    pub optimistic_sigma1: Option<Block>,
 }
 
 impl RandomnessShare {
@@ -383,6 +344,7 @@ impl RandomnessShare {
         epoch: EpochNumber,
         view: ViewNumber,
         author: PublicKey,
+        optimistic_sigma1: Option<Block>,
         mut signature_service: SignatureService,
     ) -> Self {
         let digest = digest!(epoch.to_le_bytes(), view.to_le_bytes(), "RANDOMNESS_SHARE");
@@ -392,6 +354,7 @@ impl RandomnessShare {
             view,
             author,
             signature_share,
+            optimistic_sigma1,
         }
     }
 
@@ -413,11 +376,17 @@ impl RandomnessShare {
             committee.stake(&self.author) > 0,
             ConsensusError::UnknownAuthority(self.author)
         );
-        let share = pk_set.public_key_share(committee.id(self.author));
+
         // Check the signature.
+        let share = pk_set.public_key_share(committee.id(self.author));
         ensure!(
             share.verify(&self.signature_share, &self.digest()),
             ConsensusError::InvalidSignatureShare(self.author)
+        );
+        ensure!(
+            self.optimistic_sigma1.as_ref()
+                .map_or_else(|| true, |b| b.check_sigma1(&pk_set.public_key())),
+            ConsensusError::InvalidThresholdSignature(self.author)
         );
 
         Ok(())
@@ -446,7 +415,6 @@ pub struct RandomCoin {
     pub view: ViewNumber, // view
     pub leader: PublicKey,  // elected leader of the view
     pub shares: Vec<RandomnessShare>,
-    pub is_fallback: bool,
 }
 
 impl RandomCoin {

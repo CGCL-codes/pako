@@ -31,10 +31,8 @@ impl Aggregator {
             self.used.insert(author),
             ConsensusError::AuthorityReuseinQC(author, vote)
         );
-
         self.votes.push(vote.clone());
         self.weight += weight;
-
         Ok(())
     }
 
