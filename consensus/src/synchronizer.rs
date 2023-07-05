@@ -5,6 +5,7 @@ use crate::filter::FilterInput;
 use crypto::PublicKey;
 use futures::Future;
 use log::debug;
+use std::fmt;
 use std::{task::{Waker, Poll, Context}, pin::Pin, sync::{Mutex, Arc}};
 use tokio::sync::mpsc::Sender;
 
@@ -35,24 +36,4 @@ impl Future for ElectionFuture {
             },
         }
     }
-}
-
-pub async fn transmit(
-    message: ConsensusMessage,
-    from: &PublicKey,
-    to: Option<&PublicKey>,
-    network_filter: &Sender<FilterInput>,
-    committee: &Committee,
-) -> ConsensusResult<()> {
-    let addresses = if let Some(to) = to {
-        debug!("Sending {:?} to {}", message, to);
-        vec![committee.address(to)?]
-    } else {
-        debug!("Broadcasting {:?}", message);
-        committee.broadcast_addresses(from)
-    };
-    if let Err(e) = network_filter.send((message, addresses)).await {
-        panic!("Failed to send block through network channel: {}", e);
-    }
-    Ok(())
 }

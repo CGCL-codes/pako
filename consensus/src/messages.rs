@@ -79,6 +79,65 @@ impl fmt::Display for ConsensusMessage {
     }
 }
 
+#[derive(Debug)]
+pub enum BAMessage {
+    Val(BAVote),
+    Aux(BAVote),
+    Conf(BAVote),
+}
+
+impl Hash for BAMessage {
+    fn digest(&self) -> Digest {
+        let phase = match self {
+            BAMessage::Val(_) => &[0],
+            BAMessage::Aux(_) => &[1],
+            BAMessage::Conf(_) => &[2],
+        };
+        digest!(phase, "BAMessage")
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct BAVote {
+    author: PublicKey,
+    vote: bool,
+    epoch: EpochNumber, // epoch that outer protocol currently in
+    view: ViewNumber, // view that aba instance proceeds into
+}
+
+impl fmt::Display for BAVote {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "BAVote(author {}, epoch {}, view {}, vote {})",
+            self.author,
+            self.epoch,
+            self.view,
+            self.vote
+        )
+    }
+}
+
+impl BAVote {
+    pub fn new(author: PublicKey, vote: bool, epoch: EpochNumber, view: ViewNumber) -> Self {
+            Self {
+                author,
+                vote,
+                epoch,
+                view,
+            }
+        }
+
+    pub fn verify(&self, committee: &Committee) -> ConsensusResult<()> {
+        let voting_rights = committee.stake(&self.author);
+        ensure!(
+            voting_rights > 0,
+            ConsensusError::UnknownAuthority(self.author)
+        );
+        Ok(())
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Block {
     pub payload: Vec<Digest>,
@@ -177,7 +236,7 @@ impl fmt::Debug for Block {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
         write!(
             f,
-            "{}: B(author {}, epoch {}, view {}, PBPhase {}, payload_len {}",
+            "{}: Block(author {}, epoch {}, view {}, PBPhase {}, payload_len {})",
             self.digest(),
             self.author,
             self.epoch,
@@ -405,7 +464,7 @@ impl Hash for RandomnessShare {
 
 impl fmt::Debug for RandomnessShare {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
-        write!(f, "RandomnessShare (author {}, epoch {}, view {})", self.author, self.epoch, self.view)
+        write!(f, "RandomnessShare(author {}, epoch {}, view {})", self.author, self.epoch, self.view)
     }
 }
 
@@ -559,7 +618,7 @@ impl Hash for PreVote {
 
 impl fmt::Debug for PreVote {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
-        write!(f, "PreVote (author {}, epoch {}, view {}, leader {}, body {})", 
+        write!(f, "PreVote(author {}, epoch {}, view {}, leader {}, body {})", 
             self.author,
             self.epoch,
             self.view, 
@@ -672,7 +731,7 @@ impl Hash for Vote {
 
 impl fmt::Debug for Vote {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
-        write!(f, "Vote (author {}, epoch {}, view {}, leader {}, body {})", 
+        write!(f, "Vote(author {}, epoch {}, view {}, leader {}, body {})", 
             self.author,
             self.epoch,
             self.view, 

@@ -1,4 +1,4 @@
-use crate::{messages::Proof, config::{EpochNumber, ViewNumber}, ConsensusMessage};
+use crate::{messages::Proof, config::{EpochNumber, ViewNumber}, ConsensusMessage, aba::BAVote};
 use crypto::{CryptoError, Digest, PublicKey};
 use store::StoreError;
 use thiserror::Error;
@@ -52,6 +52,9 @@ pub enum ConsensusError {
 
     #[error("Invalid threshold signature from {0}")]
     InvalidThresholdSignature(PublicKey),
+
+    #[error("Invalid Vote for ABA {0}")]
+    InvalidVoteForBinaryAgreement(BAVote),
 
     #[error("Random coin with wrong leader")]
     RandomCoinWithWrongLeader,

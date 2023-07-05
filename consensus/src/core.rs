@@ -5,7 +5,7 @@ use crate::aggregator::Aggregator;
 use crate::config::{Committee, Parameters, EpochNumber, ViewNumber};
 use crate::filter::FilterInput;
 use crate::mempool::MempoolDriver;
-use crate::synchronizer::{ElectionState, ElectionFuture, transmit};
+use crate::synchronizer::{ElectionState, ElectionFuture};
 use crate::error::{ConsensusError, ConsensusResult};
 use crate::messages::*;
 use crypto::Hash as _;
@@ -182,14 +182,21 @@ impl Core {
         }
     }
 
-    async fn transmit(&self, message: ConsensusMessage, to: Option<&PublicKey>) -> ConsensusResult<()> {
-        transmit(
-            message,
-            &self.name,
-            to,
-            &self.network_filter,
-            &self.committee,
-        ).await
+    async fn transmit(&self,
+        message: ConsensusMessage,
+        to: Option<&PublicKey>,
+    ) -> ConsensusResult<()> {
+        let addresses = if let Some(to) = to {
+            debug!("Sending ConsensusMessage {:?} to {}", message, to);
+            vec![self.committee.address(to)?]
+        } else {
+            debug!("Broadcasting ConsensusMessage {:?}", message);
+            self.committee.broadcast_addresses(&self.name)
+        };
+        if let Err(e) = &self.network_filter.send((message, addresses)).await {
+            panic!("Failed to send block through network channel: {}", e);
+        }
+        Ok(())
     }
 
     fn get_optimistic_leader(&self, epoch: EpochNumber) -> PublicKey {

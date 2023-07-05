@@ -11,6 +11,7 @@ mod core;
 mod filter;
 mod synchronizer;
 mod mempool;
+mod aba;
 
 #[cfg(test)]
 #[path = "tests/common.rs"]
