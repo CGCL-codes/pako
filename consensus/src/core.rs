@@ -3,7 +3,7 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use crate::aggregator::Aggregator;
 use crate::config::{Committee, Parameters, EpochNumber, ViewNumber};
-use crate::filter::FilterInput;
+use crate::filter::ConsensusFilterInput;
 use crate::mempool::MempoolDriver;
 use crate::synchronizer::{ElectionState, ElectionFuture};
 use crate::error::{ConsensusError, ConsensusResult};
@@ -28,14 +28,14 @@ pub struct Core {
 
     store: Store,
     mempool_driver: MempoolDriver,
-    network_filter: Sender<FilterInput>,
+    network_filter: Sender<ConsensusFilterInput>,
 
     core_channel: Receiver<ConsensusMessage>,
     halt_channel: Sender<(Arc<Mutex<ElectionState>>, Block)>, // handle halts
     advance_channel: Receiver<Block>, // propose block for next epoch
     commit_channel: Sender<Block>,
 
-    votes_aggregators: HashMap<(EpochNumber, Digest), Aggregator>, // n-f votes collector
+    votes_aggregators: HashMap<(EpochNumber, Digest), Aggregator<ConsensusMessage>>, // n-f votes collector
     election_states: HashMap<(EpochNumber, ViewNumber), Arc<Mutex<ElectionState>>>, // stores states of leader election and block delivery
     blocks_received: HashMap<(PublicKey, EpochNumber, ViewNumber), Block>,  // blocks received from others and the node itself, will be updated as consensus proceeds
 
@@ -54,7 +54,7 @@ impl Core {
         store: Store,
         mempool_driver: MempoolDriver,
         core_channel: Receiver<ConsensusMessage>,
-        network_filter: Sender<FilterInput>,
+        network_filter: Sender<ConsensusFilterInput>,
         commit_channel: Sender<Block>,
     ) -> Self {
         let (tx_halt, mut rx_halt): (_, Receiver<(Arc<Mutex<ElectionState>>, Block)>) = channel(10000);
@@ -242,7 +242,7 @@ impl Core {
             self.signature_service.clone()).await;
         self.votes_aggregators
             .entry((echo.epoch, echo.digest()))
-            .or_insert_with(|| Aggregator::new())
+            .or_insert_with(|| Aggregator::<ConsensusMessage>::new())
             .append(echo.author, ConsensusMessage::Echo(echo.clone()), self.committee.stake(&echo.author))?;
 
         // Broadcast VAL to all nodes.
@@ -330,7 +330,7 @@ impl Core {
 
         self.votes_aggregators
             .entry((echo.epoch, echo.digest()))
-            .or_insert_with(|| Aggregator::new())
+            .or_insert_with(|| Aggregator::<ConsensusMessage>::new())
             .append(echo.author, ConsensusMessage::Echo(echo.clone()), self.committee.stake(&echo.author))?;
 
         let shares = self.votes_aggregators
@@ -411,7 +411,7 @@ impl Core {
         let finish = Finish(block.clone());
         self.votes_aggregators
             .entry((finish.0.epoch, finish.digest()))
-            .or_insert_with(|| Aggregator::new())
+            .or_insert_with(|| Aggregator::<ConsensusMessage>::new())
             .append(finish.0.author, ConsensusMessage::Finish(finish.clone()), self.committee.stake(&finish.0.author))?;
 
         // Broadcast Finish to all nodes.
@@ -430,7 +430,7 @@ impl Core {
 
         self.votes_aggregators
             .entry((finish.0.epoch, finish.digest()))
-            .or_insert_with(|| Aggregator::new())
+            .or_insert_with(|| Aggregator::<ConsensusMessage>::new())
             .append(finish.0.author, ConsensusMessage::Finish(finish.clone()), self.committee.stake(&finish.0.author))?;
 
         // Since the optimistic leader won't broadcast its Finish, minus quorum threshold by 1. 
@@ -466,7 +466,7 @@ impl Core {
                 // Collect the node's own randomness share.
                 self.votes_aggregators
                     .entry((randomness_share.epoch, randomness_share.digest()))
-                    .or_insert_with(|| Aggregator::new())
+                    .or_insert_with(|| Aggregator::<ConsensusMessage>::new())
                     .append(randomness_share.author, 
                         ConsensusMessage::RandomnessShare(randomness_share.clone()), 
                         self.committee.stake(&randomness_share.author))?;
@@ -480,10 +480,9 @@ impl Core {
     async fn handle_randommess_share(&mut self, randomness_share: &RandomnessShare) -> ConsensusResult<()> {
         randomness_share.verify(&self.committee, &self.pk_set, self.halt_mark, &self.epochs_halted)?;
 
-        // f+1 shares to form a random coin.
         self.votes_aggregators
             .entry((randomness_share.epoch, randomness_share.digest()))
-            .or_insert_with(|| Aggregator::new())
+            .or_insert_with(|| Aggregator::<ConsensusMessage>::new())
             .append(randomness_share.author, 
                 ConsensusMessage::RandomnessShare(randomness_share.clone()), 
                 self.committee.stake(&randomness_share.author))?;
@@ -628,7 +627,7 @@ impl Core {
         // Collect the node's own Prevote.
         self.votes_aggregators
             .entry((prevote.epoch, prevote.digest()))
-            .or_insert_with(|| Aggregator::new())
+            .or_insert_with(|| Aggregator::<ConsensusMessage>::new())
             .append(prevote.author, ConsensusMessage::PreVote(
                 prevote.clone()), 
                 self.committee.stake(&prevote.author
@@ -643,7 +642,7 @@ impl Core {
 
         self.votes_aggregators
             .entry((prevote.epoch, prevote.digest()))
-            .or_insert_with(|| Aggregator::new())
+            .or_insert_with(|| Aggregator::<ConsensusMessage>::new())
             .append(prevote.author, ConsensusMessage::PreVote(prevote.clone()), self.committee.stake(&prevote.author))?;
 
         let prevotes = self.votes_aggregators
@@ -719,7 +718,7 @@ impl Core {
                 // Collect the node's own Vote.
                 self.votes_aggregators
                     .entry((vote.epoch, vote.digest()))
-                    .or_insert_with(|| Aggregator::new())
+                    .or_insert_with(|| Aggregator::<ConsensusMessage>::new())
                     .append(vote.author, ConsensusMessage::Vote(vote.clone()), self.committee.stake(&vote.author))?;
 
                 self.transmit(ConsensusMessage::Vote(vote), None).await
@@ -732,7 +731,7 @@ impl Core {
 
         self.votes_aggregators
             .entry((vote.epoch, vote.digest()))
-            .or_insert_with(|| Aggregator::new())
+            .or_insert_with(|| Aggregator::<ConsensusMessage>::new())
             .append(vote.author, ConsensusMessage::Vote(vote.clone()), self.committee.stake(&vote.author))?;
 
         let votes = self.votes_aggregators

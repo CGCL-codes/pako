@@ -1,13 +1,6 @@
-use crate::{config::Committee, messages::RandomCoin};
-use crate::messages::ConsensusMessage;
-use crate::error::ConsensusResult;
-use crate::filter::FilterInput;
-use crypto::PublicKey;
+use crate::messages::RandomCoin;
 use futures::Future;
-use log::debug;
-use std::fmt;
 use std::{task::{Waker, Poll, Context}, pin::Pin, sync::{Mutex, Arc}};
-use tokio::sync::mpsc::Sender;
 
 #[cfg(test)]
 #[path = "tests/synchronizer_tests.rs"]

@@ -1,46 +1,37 @@
+use crate::ConsensusMessage;
+use crate::aba::BAMessage;
 use crate::config::Parameters;
-use crate::messages::ConsensusMessage;
 use bytes::Bytes;
 use futures::stream::futures_unordered::FuturesUnordered;
 use futures::stream::StreamExt as _;
 use network::NetMessage;
+use serde::Serialize;
 use std::net::SocketAddr;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::time::{sleep, Duration};
 
-pub type FilterInput = (ConsensusMessage, Vec<SocketAddr>);
+pub type ConsensusFilterInput = (ConsensusMessage, Vec<SocketAddr>);
+pub type BAFilterInput = (BAMessage, Vec<SocketAddr>);
+pub struct Filter<T> {
+    pub from: Receiver<(T, Vec<SocketAddr>)>,
+    pub to: Sender<NetMessage>,
+    pub parameters: Parameters,
+}
 
-pub struct Filter;
-
-impl Filter {
-    pub fn run(
-        mut core: Receiver<FilterInput>,
-        network: Sender<NetMessage>,
-        parameters: Parameters,
-    ) {
-        tokio::spawn(async move {
-            let mut pending = FuturesUnordered::new();
-            loop {
-                tokio::select! {
-                    Some(input) = core.recv() => pending.push(Self::delay(input, parameters.clone())),
-                    Some(input) = pending.next() => Self::transmit(input, &network).await,
-                    else => break
-                }
+impl Filter<ConsensusMessage> {
+    pub async fn run(&mut self) {
+        let mut pending = FuturesUnordered::new();
+        loop {
+            tokio::select! {
+                Some(input) = self.from.recv() => pending.push(Self::delay(input, &self.parameters)),
+                Some(input) = pending.next() => transmit(input, &self.to).await,
+                else => break
             }
-        });
-    }
-
-    async fn transmit(input: FilterInput, network: &Sender<NetMessage>) {
-        let (message, addresses) = input;
-        let bytes = bincode::serialize(&message).expect("Failed to serialize core message");
-        let net_message = NetMessage(Bytes::from(bytes), addresses);
-        if let Err(e) = network.send(net_message).await {
-            panic!("Failed to send block through network channel: {}", e);
         }
     }
 
     // TODO: fix fn delay.
-    async fn delay(input: FilterInput, parameters: Parameters) -> FilterInput {
+    async fn delay(input: ConsensusFilterInput, parameters: &Parameters) -> ConsensusFilterInput {
         let (message, _) = &input;
         if let ConsensusMessage::Val(_) = message {
             // NOTE: Increase the delay here (you can use any value from the 'parameters').
@@ -49,5 +40,25 @@ impl Filter {
             }
         }
         input
+    }
+}
+
+impl Filter<BAMessage> {
+    pub async fn run(&mut self) {
+        loop {
+            tokio::select! {
+                Some(input) = self.from.recv() => transmit(input, &self.to).await,
+                else => break
+            }
+        }
+    }
+}
+
+async fn transmit<T: Serialize>(input: (T, Vec<SocketAddr>), network: &Sender<NetMessage>) {
+    let (message, addresses) = input;
+    let bytes = bincode::serialize(&message).expect("Failed to serialize core message");
+    let net_message = NetMessage(Bytes::from(bytes), addresses);
+    if let Err(e) = network.send(net_message).await {
+        panic!("Failed to send message through network channel: {}", e);
     }
 }

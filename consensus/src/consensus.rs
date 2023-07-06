@@ -1,3 +1,4 @@
+use crate::aba::BAMessage;
 use crate::config::{Committee, Parameters};
 use crate::core::Core;
 use crate::error::ConsensusResult;
@@ -49,7 +50,8 @@ impl Consensus {
         );
 
         let (tx_network, rx_network) = channel(10000);
-        let (tx_filter, rx_filter) = channel(10000);
+        let (tx_mvba_filter, rx_mvba_filter) = channel(10000);
+        let (tx_ba_filter, rx_ba_filter) = channel(10000);
 
         // Make the network sender and receiver.
         let address = committee.address(&name).map(|mut x| {
@@ -70,7 +72,24 @@ impl Consensus {
         let mempool_driver = MempoolDriver::new(tx_consensus_mempool);
 
         // Custom filter to arbitrary delay network messages.
-        Filter::run(rx_filter, tx_network, parameters.clone());
+        let mut consensus_filter = Filter::<ConsensusMessage> {
+            from: rx_mvba_filter, 
+            to: tx_network.clone(),
+            parameters: parameters.clone() 
+        };
+        tokio::spawn(async move {
+            consensus_filter.run().await;
+        });
+
+        // Init BA message filter.
+        let mut ba_filter = Filter::<BAMessage> { 
+            from: rx_ba_filter, 
+            to: tx_network,
+            parameters: parameters.clone() 
+        };
+        tokio::spawn(async move {
+            ba_filter.run().await;
+        });
 
         let mut mvba = Core::new(
             name,
@@ -81,7 +100,7 @@ impl Consensus {
             store,
             mempool_driver,
             /* core_channel */ rx_core,
-            /* network_filter */ tx_filter,
+            /* network_filter */ tx_mvba_filter,
             /* commit_channel */ tx_commit,
         ).await;
 
