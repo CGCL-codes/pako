@@ -1,6 +1,8 @@
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use crypto::PublicKey;
+use crypto::SignatureService;
 use log::debug;
 use serde::Deserialize;
 use serde::Serialize;
@@ -11,6 +13,7 @@ use crate::error::{ConsensusError, ConsensusResult};
 use crate::filter::BAFilterInput;
 use crate::messages::RandomCoin;
 use crate::messages::RandomnessShare;
+use crate::synchronizer::transmit;
 use crate::{Committee, Parameters, EpochNumber, aggregator::Aggregator, ViewNumber};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -98,6 +101,7 @@ pub struct BinaryAgreement {
     committee: Committee,
     parameters: Parameters,
     pk_set: PublicKeySet,
+    signature_service: SignatureService,
     network_filter: Sender<BAFilterInput>,
 
     bin_val: HashMap<(EpochNumber, ViewNumber), HashSet<bool>>, 
@@ -119,6 +123,7 @@ impl BinaryAgreement {
         committee: Committee,
         parameters: Parameters,
         pk_set: PublicKeySet,
+        signature_service: SignatureService,
         network_filter: Sender<BAFilterInput>,
         input_channel: Receiver<(EpochNumber, bool)>, 
         output_channel: Sender<(EpochNumber, bool)>, 
@@ -131,6 +136,7 @@ impl BinaryAgreement {
             committee,
             parameters,
             pk_set,
+            signature_service,
             network_filter,
             bin_val: HashMap::new(),
             votes_aggregators: HashMap::new(),
@@ -144,18 +150,19 @@ impl BinaryAgreement {
         }
     }
 
-    async fn transmit(&self, message: BAMessage) -> ConsensusResult<()> {
-        debug!("Broadcasting BAMessage {:?}", message);
-        let addresses = self.committee.broadcast_addresses(&self.name);
-        if let Err(e) = &self.network_filter.send((message, addresses)).await {
-            panic!("Failed to send BA message through network channel: {}", e);
-        }
-        Ok(())
+    async fn transmit(&self, msg: BAMessage) -> ConsensusResult<()> {
+        transmit(
+            msg, 
+            &self.name, 
+            None, 
+            &self.network_filter, 
+            &self.committee
+        ).await
     }
 
     async fn val(&self, val: BAVote) -> ConsensusResult<()> {
         // Broadcast val.
-        self.transmit(BAMessage::Aux(val)).await
+        self.transmit(BAMessage::Val(val)).await
     }
 
     async fn handle_val(&mut self, vote: BAVote) -> ConsensusResult<()> {
@@ -249,22 +256,47 @@ impl BinaryAgreement {
         .append(conf.author, conf.clone(), self.committee.stake(&conf.author))?;
 
         let aggregator = self.votes_aggregators
-            .get(&(conf.epoch, conf.view, BAPhase::Aux))
-            .unwrap();
+            .get_mut(&(conf.epoch, conf.view, BAPhase::Aux))
+            .unwrap()
+            .take(self.committee.quorum_threshold());
 
-        Ok(())
+        match aggregator {
+            None => Ok(()),
+            Some(_) => {
+                let randomness_share = RandomnessShare::new(
+                    conf.epoch,
+                    conf.view, 
+                    self.name, 
+                    None,
+                    self.signature_service.clone()
+                ).await;
+                self.broadcast_random_share(randomness_share).await
+            }
+        }
     }
 
-    async fn handle_randomness_share(&mut self, randomness_share: RandomnessShare) -> ConsensusResult<()> {
-        randomness_share.verify(&self.committee, &self.pk_set, self.halt_mark, &self.epochs_halted)?;
-
-        // f+1 shares to form a random coin.
+    async fn broadcast_random_share(&mut self, randomness_share: RandomnessShare) -> ConsensusResult<()> {
+        // Collect the node's own share.
         self.coin_share_aggregators
             .entry((randomness_share.epoch, randomness_share.view, BAPhase::RandomnessShare))
             .or_insert_with(|| Aggregator::<RandomnessShare>::new())
             .append(randomness_share.author, 
                 randomness_share.clone(), 
-                self.committee.stake(&randomness_share.author));
+                self.committee.stake(&randomness_share.author))?;
+        
+        // Broadcast share.
+        self.transmit(BAMessage::RandomnessShare(randomness_share)).await
+    }
+
+    async fn handle_randomness_share(&mut self, randomness_share: RandomnessShare) -> ConsensusResult<()> {
+        randomness_share.verify(&self.committee, &self.pk_set, self.halt_mark, &self.epochs_halted)?;
+
+        self.coin_share_aggregators
+            .entry((randomness_share.epoch, randomness_share.view, BAPhase::RandomnessShare))
+            .or_insert_with(|| Aggregator::<RandomnessShare>::new())
+            .append(randomness_share.author, 
+                randomness_share.clone(), 
+                self.committee.stake(&randomness_share.author))?;
         
         // n-f randomness shares to reveal fallback leader. 
         let shares = self.coin_share_aggregators
@@ -277,21 +309,8 @@ impl BinaryAgreement {
             None => Ok(()),
 
             Some(msgs) => {
-                let shares: Vec<RandomnessShare> = msgs.into_iter()
-                    .filter_map(|s| {
-                        match s {
-                            ConsensusMessage::RandomnessShare(share) => Some(share),
-                            _ => None,
-                        }
-                    })
-                    .collect();
-
-                // Invoke ABA, vote for 1 if among shares there is at least one containing valid sigma1 
-                // of the optimistic block, otherwise 0.
-                
-
                 // Combine shares into a complete signature.
-                let share_map = shares.iter()
+                let share_map = msgs.iter()
                     .map(|s| (self.committee.id(s.author), &s.signature_share))
                     .collect::<BTreeMap<_, _>>();
                 let threshold_signature = self.pk_set.combine_signatures(share_map).expect("Unqualified shares!");
@@ -307,14 +326,18 @@ impl BinaryAgreement {
                     epoch: randomness_share.epoch,
                     view: randomness_share.view, 
                     leader, 
-                    shares,
+                    shares: msgs.into_iter().map(|s| s.clone()).collect(),
                 };
                 self.handle_random_coin(random_coin.clone()).await
             },
         }
     }
 
-    async fn handle_random_coin(&mut self, share: RandomCoin) -> ConsensusResult<()> {
+    async fn handle_random_coin(&mut self, random_coin: RandomCoin) -> ConsensusResult<()> {
+        random_coin.verify(&self.committee, &self.pk_set, self.halt_mark, &self.epochs_halted)?;
+        
+        let bin_vals = self.conf_aggregators.get(&(random_coin.epoch, random_coin.view, BAPhase::Conf)).unwrap();
+
         Ok(())
     }
 

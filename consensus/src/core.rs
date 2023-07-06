@@ -5,7 +5,7 @@ use crate::aggregator::Aggregator;
 use crate::config::{Committee, Parameters, EpochNumber, ViewNumber};
 use crate::filter::ConsensusFilterInput;
 use crate::mempool::MempoolDriver;
-use crate::synchronizer::{ElectionState, ElectionFuture};
+use crate::synchronizer::{ElectionState, ElectionFuture, transmit};
 use crate::error::{ConsensusError, ConsensusResult};
 use crate::messages::*;
 use crypto::Hash as _;
@@ -182,21 +182,8 @@ impl Core {
         }
     }
 
-    async fn transmit(&self,
-        message: ConsensusMessage,
-        to: Option<&PublicKey>,
-    ) -> ConsensusResult<()> {
-        let addresses = if let Some(to) = to {
-            debug!("Sending ConsensusMessage {:?} to {}", message, to);
-            vec![self.committee.address(to)?]
-        } else {
-            debug!("Broadcasting ConsensusMessage {:?}", message);
-            self.committee.broadcast_addresses(&self.name)
-        };
-        if let Err(e) = &self.network_filter.send((message, addresses)).await {
-            panic!("Failed to send block through network channel: {}", e);
-        }
-        Ok(())
+    async fn transmit(&self, message: ConsensusMessage, to: Option<&PublicKey>) -> ConsensusResult<()> {
+        transmit(message, &self.name, to, &self.network_filter, &self.committee).await
     }
 
     fn get_optimistic_leader(&self, epoch: EpochNumber) -> PublicKey {
@@ -348,14 +335,14 @@ impl Core {
                         match s {
                             ConsensusMessage::Echo(echo) => {
                                 let id = self.committee.id(echo.author);
-                                Some((id, echo.signature_share))
+                                Some((id, &echo.signature_share))
                             },
                             _ => None,
                         }}
                     )
                     .collect();
 
-                let threshold_signature = self.pk_set.combine_signatures(&shares).expect("not enough qualified shares");
+                let threshold_signature = self.pk_set.combine_signatures(shares).expect("not enough qualified shares");
                 
                 let mut block = match &echo.optimistic_block {
                     Some(block) => block.clone(),
@@ -498,7 +485,7 @@ impl Core {
             None => Ok(()),
 
             Some(msgs) => {
-                let shares: Vec<RandomnessShare> = msgs.into_iter()
+                let shares: Vec<_> = msgs.into_iter()
                     .filter_map(|s| {
                         match s {
                             ConsensusMessage::RandomnessShare(share) => Some(share),
@@ -528,7 +515,7 @@ impl Core {
                     epoch: randomness_share.epoch,
                     view: randomness_share.view, 
                     leader, 
-                    shares,
+                    shares: shares.into_iter().map(|s| s.clone()).collect(),
                 };
                 self.handle_random_coin(random_coin.clone()).await
             },
@@ -687,13 +674,13 @@ impl Core {
                                 }
                             })
                             .filter_map(|prevote| {
-                                match prevote.body {
+                                match &prevote.body {
                                     PreVoteEnum::No(share) => Some((self.committee.id(prevote.author), share)),
                                     _ => None,
                                 }
                             })
                             .collect();
-                        let threshold_signature = self.pk_set.combine_signatures(&shares).expect("not enough qualified shares");
+                        let threshold_signature = self.pk_set.combine_signatures(shares).expect("not enough qualified shares");
 
                         let digest = digest!(
                             prevote.epoch.to_le_bytes(),

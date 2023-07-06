@@ -35,12 +35,10 @@ impl<T> Aggregator<T> {
         Ok(())
     }
 
-}
-
-impl Aggregator<ConsensusMessage> {
-    pub fn take(&mut self, threshold: Stake) -> Option<Vec<ConsensusMessage>> {
-        (self.weight == threshold).then(|| self.votes.clone())
+    pub fn take(&mut self, threshold: Stake) -> Option<&Vec<T>> {
+        (self.weight == threshold).then(|| &self.votes)
     }
+
 }
 
 impl Aggregator<BAVote> {

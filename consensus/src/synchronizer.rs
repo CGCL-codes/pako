@@ -1,6 +1,9 @@
-use crate::messages::RandomCoin;
+use crate::{messages::RandomCoin, Committee, error::ConsensusResult};
+use crypto::PublicKey;
 use futures::Future;
-use std::{task::{Waker, Poll, Context}, pin::Pin, sync::{Mutex, Arc}};
+use log::debug;
+use tokio::sync::mpsc::Sender;
+use std::{task::{Waker, Poll, Context}, pin::Pin, sync::{Mutex, Arc}, net::SocketAddr, fmt::Debug};
 
 #[cfg(test)]
 #[path = "tests/synchronizer_tests.rs"]
@@ -29,4 +32,24 @@ impl Future for ElectionFuture {
             },
         }
     }
+}
+
+pub async fn transmit<T: Debug> (
+    message: T, 
+    from: &PublicKey, 
+    to: Option<&PublicKey>,
+    network_filter: &Sender<(T, Vec<SocketAddr>)>,
+    committee: &Committee
+) -> ConsensusResult<()> {
+    let addresses = if let Some(to) = to {
+        debug!("Sending {:?} to {}", message, to);
+        vec![committee.address(to)?]
+    } else {
+        debug!("Broadcasting {:?}", message);
+        committee.broadcast_addresses(from)
+    };
+    if let Err(e) = network_filter.send((message, addresses)).await {
+        panic!("Failed to send message through network channel: {}", e);
+    }
+    Ok(())
 }
