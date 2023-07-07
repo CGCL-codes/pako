@@ -1,4 +1,4 @@
-use crate::{ConsensusMessage, Committee};
+use crate::Committee;
 use crate::aba::BAVote;
 use crate::config::Stake;
 use crate::error::{ConsensusError, ConsensusResult};
@@ -35,7 +35,7 @@ impl<T> Aggregator<T> {
         Ok(())
     }
 
-    pub fn take(&mut self, threshold: Stake) -> Option<&Vec<T>> {
+    pub fn take(&self, threshold: Stake) -> Option<&Vec<T>> {
         (self.weight == threshold).then(|| &self.votes)
     }
 

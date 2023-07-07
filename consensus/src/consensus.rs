@@ -1,4 +1,4 @@
-use crate::aba::BAMessage;
+use crate::aba::{BAMessage, BinaryAgreement};
 use crate::config::{Committee, Parameters};
 use crate::core::Core;
 use crate::error::ConsensusResult;
@@ -29,6 +29,8 @@ impl Consensus {
         pk_set: PublicKeySet,   // The set of tss public keys
         tx_core: Sender<ConsensusMessage>,
         rx_core: Receiver<ConsensusMessage>,
+        tx_ba_core: Sender<BAMessage>,
+        rx_ba_core: Receiver<BAMessage>,
         tx_consensus_mempool: Sender<ConsensusMempoolMessage>,
         tx_commit: Sender<Block>,
     ) -> ConsensusResult<()> {
@@ -50,8 +52,12 @@ impl Consensus {
         );
 
         let (tx_network, rx_network) = channel(10000);
+    
         let (tx_mvba_filter, rx_mvba_filter) = channel(10000);
         let (tx_ba_filter, rx_ba_filter) = channel(10000);
+
+        let (tx_ba, rx_ba) = channel(10000);
+        let (tx_ba_output, rx_ba_output) = channel(10000);
 
         // Make the network sender and receiver.
         let address = committee.address(&name).map(|mut x| {
@@ -67,6 +73,9 @@ impl Consensus {
         tokio::spawn(async move {
             network_sender.run().await;
         });
+
+        // Make network sender and receiver for ABA.
+        
 
         // Make the mempool driver which will mediate our requests to the mempool.
         let mempool_driver = MempoolDriver::new(tx_consensus_mempool);
@@ -91,21 +100,39 @@ impl Consensus {
             ba_filter.run().await;
         });
 
+        // Start main protocol.
         let mut mvba = Core::new(
             name,
-            committee,
-            parameters,
-            signature_service,
-            pk_set,
+            committee.clone(),
+            parameters.clone(),
+            signature_service.clone(),
+            pk_set.clone(),
             store,
             mempool_driver,
             /* core_channel */ rx_core,
+            /* aba_invoke_channel */tx_ba,
+            /* aba_output_channel */rx_ba_output,
             /* network_filter */ tx_mvba_filter,
             /* commit_channel */ tx_commit,
-        ).await;
-
+        );
         tokio::spawn(async move {
             mvba.run().await;
+        });
+
+        // Start ABA.
+        let mut aba = BinaryAgreement::new(
+            name,
+            committee,
+            parameters,
+            pk_set,
+            signature_service,
+            tx_ba_filter,
+            rx_ba,
+            tx_ba_output,
+            rx_ba_core,
+        );
+        tokio::spawn(async move {
+            aba.run().await;
         });
     
         Ok(())

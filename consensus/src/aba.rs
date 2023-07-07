@@ -4,6 +4,8 @@ use std::collections::HashSet;
 use crypto::PublicKey;
 use crypto::SignatureService;
 use log::debug;
+use log::error;
+use log::warn;
 use serde::Deserialize;
 use serde::Serialize;
 use threshold_crypto::PublicKeySet;
@@ -128,8 +130,6 @@ impl BinaryAgreement {
         input_channel: Receiver<(EpochNumber, bool)>, 
         output_channel: Sender<(EpochNumber, bool)>, 
         core_channel: Receiver<BAMessage>, 
-        halt_mark: EpochNumber,
-        epochs_halted: HashSet<EpochNumber>,
     ) -> Self {
         Self {
             name,
@@ -160,39 +160,51 @@ impl BinaryAgreement {
         ).await
     }
 
-    async fn val(&self, val: BAVote) -> ConsensusResult<()> {
+    async fn val(&mut self, val: BAVote) -> ConsensusResult<()> {
+        // Collect the node's own val.
+        self.votes_aggregators
+        .entry((val.epoch, val.view, BAPhase::Val))
+        .or_insert_with(|| Aggregator::<BAVote>::new())
+        .append(val.author, val.clone(), self.committee.stake(&val.author))?;
+
         // Broadcast val.
         self.transmit(BAMessage::Val(val)).await
     }
 
-    async fn handle_val(&mut self, vote: BAVote) -> ConsensusResult<()> {
-        vote.verify(&self.committee, &self.halt_mark, &self.epochs_halted)?;
+    async fn handle_val(&mut self, val: BAVote) -> ConsensusResult<()> {
+        val.verify(&self.committee, &self.halt_mark, &self.epochs_halted)?;
 
-        self.votes_aggregators
-        .entry((vote.epoch, vote.view, BAPhase::Val))
-        .or_insert_with(|| Aggregator::<BAVote>::new())
-        .append(vote.author, vote.clone(), self.committee.stake(&vote.author))?;
+        let mut forward_prepared = false;
+        let mut has_qc = false;
+        let mut opposite_has_qc = false;
+        {
+            let aggregator = self.votes_aggregators
+            .entry((val.epoch, val.view, BAPhase::Val))
+            .or_insert_with(|| Aggregator::<BAVote>::new());
 
-        let aggregator = self.votes_aggregators
-            .get(&(vote.epoch, vote.view, BAPhase::Val))
-            .unwrap();
+            aggregator.append(val.author, val.clone(), self.committee.stake(&val.author))?;
+
+            forward_prepared = aggregator.is_verified(&self.committee, &val.vote, &self.committee.random_coin_threshold());
+            has_qc = aggregator.is_verified(&self.committee, &val.vote, &self.committee.quorum_threshold());
+            opposite_has_qc = aggregator.is_verified(&self.committee, &!val.vote, &self.committee.quorum_threshold());
+        }
 
         // Broadcast val if received f+1 copies.
-        if aggregator.is_verified(&self.committee, &vote.vote, &self.committee.random_coin_threshold()) {
-            self.val(vote.clone()).await?;
+        if forward_prepared {
+            self.val(val.clone()).await?;
         }
         
         // Add val to bin_val if received n-f copies, 
         // broadcast aux if it's the first to collect a quorum.
-        if aggregator.is_verified(&self.committee, &vote.vote, &self.committee.quorum_threshold()) {
-            self.bin_val.entry((vote.epoch, vote.view))
+        if has_qc {
+            self.bin_val.entry((val.epoch, val.view))
                 .or_insert({
                     let mut bin_val = HashSet::new();
-                    bin_val.insert(vote.vote);
+                    bin_val.insert(val.vote);
                     bin_val
                 });
-            if !aggregator.is_verified(&self.committee, &vote.vote, &self.committee.quorum_threshold()) {
-                self.aux(vote).await?;
+            if !opposite_has_qc {
+                self.aux(val).await?;
             }
         }
 
@@ -213,14 +225,11 @@ impl BinaryAgreement {
     async fn handle_aux(&mut self, aux: BAVote) -> ConsensusResult<()> {
         aux.verify(&self.committee, &self.halt_mark, &self.epochs_halted)?;
 
-        self.votes_aggregators
-        .entry((aux.epoch, aux.view, BAPhase::Aux))
-        .or_insert_with(|| Aggregator::<BAVote>::new())
-        .append(aux.author, aux.clone(), self.committee.stake(&aux.author))?;
-
         let aggregator = self.votes_aggregators
-            .get(&(aux.epoch, aux.view, BAPhase::Aux))
-            .unwrap();
+        .entry((aux.epoch, aux.view, BAPhase::Aux))
+        .or_insert_with(|| Aggregator::<BAVote>::new());
+
+        aggregator.append(aux.author, aux.clone(), self.committee.stake(&aux.author))?;
 
         // Broadcast conf if received n-f aux.
         if aggregator.weight == self.committee.quorum_threshold() {
@@ -250,16 +259,13 @@ impl BinaryAgreement {
     async fn handle_conf(&mut self, conf: BAConf) -> ConsensusResult<()> {
         conf.verify(&self.committee, &self.halt_mark, &self.epochs_halted)?;
 
-        self.conf_aggregators
+        let aggregator = self.conf_aggregators
         .entry((conf.epoch, conf.view, BAPhase::Aux))
-        .or_insert_with(|| Aggregator::<BAConf>::new())
-        .append(conf.author, conf.clone(), self.committee.stake(&conf.author))?;
+        .or_insert_with(|| Aggregator::<BAConf>::new());
 
-        let aggregator = self.votes_aggregators
-            .get_mut(&(conf.epoch, conf.view, BAPhase::Aux))
-            .unwrap()
-            .take(self.committee.quorum_threshold());
+        aggregator.append(conf.author, conf.clone(), self.committee.stake(&conf.author))?;
 
+        let aggregator = aggregator.take(self.committee.quorum_threshold());
         match aggregator {
             None => Ok(()),
             Some(_) => {
@@ -291,19 +297,16 @@ impl BinaryAgreement {
     async fn handle_randomness_share(&mut self, randomness_share: RandomnessShare) -> ConsensusResult<()> {
         randomness_share.verify(&self.committee, &self.pk_set, self.halt_mark, &self.epochs_halted)?;
 
-        self.coin_share_aggregators
+        let shares = self.coin_share_aggregators
             .entry((randomness_share.epoch, randomness_share.view, BAPhase::RandomnessShare))
-            .or_insert_with(|| Aggregator::<RandomnessShare>::new())
-            .append(randomness_share.author, 
-                randomness_share.clone(), 
-                self.committee.stake(&randomness_share.author))?;
+            .or_insert_with(|| Aggregator::<RandomnessShare>::new());
+
+        shares.append(randomness_share.author, 
+            randomness_share.clone(), 
+            self.committee.stake(&randomness_share.author))?;
         
         // n-f randomness shares to reveal fallback leader. 
-        let shares = self.coin_share_aggregators
-            .get_mut(&(randomness_share.epoch, randomness_share.view, BAPhase::RandomnessShare))
-            .unwrap()
-            .take(self.committee.quorum_threshold());
-
+        let shares = shares.take(self.committee.quorum_threshold());
         match shares {
             // Votes not enough.
             None => Ok(()),
@@ -335,10 +338,61 @@ impl BinaryAgreement {
 
     async fn handle_random_coin(&mut self, random_coin: RandomCoin) -> ConsensusResult<()> {
         random_coin.verify(&self.committee, &self.pk_set, self.halt_mark, &self.epochs_halted)?;
+
+        let coin = self.committee.id(random_coin.leader) / 2 == 0;
         
-        let bin_vals = self.conf_aggregators.get(&(random_coin.epoch, random_coin.view, BAPhase::Conf)).unwrap();
+        let bin_vals = self.conf_aggregators
+            .get(&(random_coin.epoch, random_coin.view, BAPhase::Conf))
+            .unwrap()
+            .votes.to_owned();
+
+        let union = bin_vals.into_iter()
+            .fold(HashSet::<bool>::new(), |intersect, conf| {
+                intersect.union(&conf.bin_val).cloned().collect()
+            });
+
+        if union.len() == 2 {
+            self.val(BAVote { 
+                author: self.name, 
+                vote: coin, 
+                epoch: random_coin.epoch, 
+                view: random_coin.view+1 
+            }).await?;
+        } else {
+            let next_vote = union.iter().any(|vote| *vote);
+            self.val(BAVote { 
+                author: self.name, 
+                vote: next_vote, 
+                epoch: random_coin.epoch, 
+                view: random_coin.view+1 
+            }).await?;
+
+            if next_vote == coin {
+                // Output value to mvba.
+                self.output(random_coin.epoch, coin).await;
+            }
+        }
 
         Ok(())
+    }
+
+    async fn output(&mut self, epoch: EpochNumber, vote: bool) {
+        self.output_channel.send((epoch, vote)).await
+            .expect("Failed to send ABA result back through output channel.");
+
+        self.cleanup_epoch(epoch);
+    }
+
+    fn cleanup_epoch(&mut self, epoch: EpochNumber) {
+        // Mark epoch as halted.
+        self.epochs_halted.insert(epoch);
+        if self.epochs_halted.remove(&(self.halt_mark + 1)) {
+            self.halt_mark += 1;
+        }
+
+        self.votes_aggregators.retain(|&(e, _, _), _| e != epoch);
+        self.conf_aggregators.retain(|&(e, _, _), _| e != epoch);
+        self.coin_share_aggregators.retain(|&(e, _, _), _| e != epoch);
     }
 
     pub async fn run(&mut self) {
@@ -346,7 +400,7 @@ impl BinaryAgreement {
             let result = tokio::select! {
                 Some((epoch, vote)) = self.input_channel.recv() => {
                     let vote = BAVote { author: self.name, vote, epoch, view: 1 };
-                    self.handle_val(vote).await
+                    self.val(vote).await
                 },
                 Some(msg) = self.core_channel.recv() => {
                     match msg {
@@ -360,8 +414,9 @@ impl BinaryAgreement {
             };
 
             match result {
-                Ok(_) => todo!(),
-                Err(_) => todo!(),
+                Ok(()) => (),
+                Err(ConsensusError::SerializationError(e)) => error!("Store corrupted. {}", e),
+                Err(e) => warn!("{}", e),
             }
         }
     }

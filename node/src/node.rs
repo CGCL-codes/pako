@@ -44,6 +44,8 @@ impl Node {
         let (tx_consensus, rx_consensus) = channel(10000);
         let (tx_consensus_mempool, rx_consensus_mempool) = channel(10000);
 
+        let (tx_ba_core, rx_ba_core) = channel(10000);
+
         // Read the committee and secret key from file.
         let committee = Committee::read(committee_file)?;
         info!("committee {:?}", committee);
@@ -86,6 +88,8 @@ impl Node {
             pk_set,
             tx_consensus,
             rx_consensus,
+            tx_ba_core,
+            rx_ba_core,
             tx_consensus_mempool,
             tx_commit,
         )

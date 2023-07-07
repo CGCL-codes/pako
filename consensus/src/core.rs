@@ -31,6 +31,8 @@ pub struct Core {
     network_filter: Sender<ConsensusFilterInput>,
 
     core_channel: Receiver<ConsensusMessage>,
+    aba_channel: Sender<(EpochNumber, bool)>, // channel to invoke aba
+    aba_feedback_channel: Receiver<(EpochNumber, bool)>, // read aba result
     halt_channel: Sender<(Arc<Mutex<ElectionState>>, Block)>, // handle halts
     advance_channel: Receiver<Block>, // propose block for next epoch
     commit_channel: Sender<Block>,
@@ -45,7 +47,7 @@ pub struct Core {
 
 impl Core {
     #[allow(clippy::too_many_arguments)]
-    pub async fn new(
+    pub fn new(
         name: PublicKey,
         committee: Committee,
         parameters: Parameters,
@@ -54,6 +56,8 @@ impl Core {
         store: Store,
         mempool_driver: MempoolDriver,
         core_channel: Receiver<ConsensusMessage>,
+        aba_channel: Sender<(EpochNumber, bool)>,
+        aba_feedback_channel: Receiver<(EpochNumber, bool)>,
         network_filter: Sender<ConsensusFilterInput>,
         commit_channel: Sender<Block>,
     ) -> Self {
@@ -108,6 +112,8 @@ impl Core {
             mempool_driver,
             network_filter,
             core_channel,
+            aba_channel,
+            aba_feedback_channel,
             commit_channel,
             halt_channel: tx_halt,
             advance_channel: rx_advance,
