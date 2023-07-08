@@ -33,7 +33,6 @@ pub enum BAPhase {
     Aux,
     Conf,
     RandomnessShare,
-    RandomCoin,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -174,20 +173,15 @@ impl BinaryAgreement {
     async fn handle_val(&mut self, val: BAVote) -> ConsensusResult<()> {
         val.verify(&self.committee, &self.halt_mark, &self.epochs_halted)?;
 
-        let mut forward_prepared = false;
-        let mut has_qc = false;
-        let mut opposite_has_qc = false;
-        {
-            let aggregator = self.votes_aggregators
-            .entry((val.epoch, val.view, BAPhase::Val))
-            .or_insert_with(|| Aggregator::<BAVote>::new());
+        let aggregator = self.votes_aggregators
+        .entry((val.epoch, val.view, BAPhase::Val))
+        .or_insert_with(|| Aggregator::<BAVote>::new());
 
-            aggregator.append(val.author, val.clone(), self.committee.stake(&val.author))?;
+        aggregator.append(val.author, val.clone(), self.committee.stake(&val.author))?;
 
-            forward_prepared = aggregator.is_verified(&self.committee, &val.vote, &self.committee.random_coin_threshold());
-            has_qc = aggregator.is_verified(&self.committee, &val.vote, &self.committee.quorum_threshold());
-            opposite_has_qc = aggregator.is_verified(&self.committee, &!val.vote, &self.committee.quorum_threshold());
-        }
+        let forward_prepared = aggregator.is_verified(&self.committee, &val.vote, &self.committee.random_coin_threshold());
+        let has_qc = aggregator.is_verified(&self.committee, &val.vote, &self.committee.quorum_threshold());
+        let opposite_has_qc = aggregator.is_verified(&self.committee, &!val.vote, &self.committee.quorum_threshold());
 
         // Broadcast val if received f+1 copies.
         if forward_prepared {
@@ -273,7 +267,7 @@ impl BinaryAgreement {
                     conf.epoch,
                     conf.view, 
                     self.name, 
-                    None,
+                    false,
                     self.signature_service.clone()
                 ).await;
                 self.broadcast_random_share(randomness_share).await
@@ -326,10 +320,11 @@ impl BinaryAgreement {
                 debug!("Random coin of epoch {} view {} elects leader id {}", randomness_share.epoch, randomness_share.view, id);
 
                 let random_coin = RandomCoin {
+                    author: self.name,
                     epoch: randomness_share.epoch,
                     view: randomness_share.view, 
-                    leader, 
-                    shares: msgs.into_iter().map(|s| s.clone()).collect(),
+                    fallback_leader: leader, 
+                    threshold_sig: threshold_signature,
                 };
                 self.handle_random_coin(random_coin.clone()).await
             },
@@ -339,7 +334,7 @@ impl BinaryAgreement {
     async fn handle_random_coin(&mut self, random_coin: RandomCoin) -> ConsensusResult<()> {
         random_coin.verify(&self.committee, &self.pk_set, self.halt_mark, &self.epochs_halted)?;
 
-        let coin = self.committee.id(random_coin.leader) / 2 == 0;
+        let coin = self.committee.id(random_coin.fallback_leader) / 2 == 0;
         
         let bin_vals = self.conf_aggregators
             .get(&(random_coin.epoch, random_coin.view, BAPhase::Conf))

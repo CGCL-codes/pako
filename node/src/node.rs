@@ -2,7 +2,7 @@ use crate::config::Export as _;
 use crate::config::{Committee, Parameters, Secret};
 use consensus::{Block, Consensus, ConsensusError};
 use crypto::{SignatureService, SecretShare};
-use log::{info, warn};
+use log::info;
 use mempool::{Mempool, MempoolError};
 use store::{Store, StoreError};
 use thiserror::Error;
@@ -82,6 +82,7 @@ impl Node {
         Consensus::run(
             name,
             committee.consensus,
+            committee.aba,
             parameters.consensus,
             store.clone(),
             signature_service,

@@ -1,4 +1,4 @@
-use crate::{messages::Proof, config::{EpochNumber, ViewNumber}, aba::{BAVote}};
+use crate::{messages::Proof, config::{EpochNumber, ViewNumber}};
 use crypto::{CryptoError, Digest, PublicKey};
 use store::StoreError;
 use thiserror::Error;

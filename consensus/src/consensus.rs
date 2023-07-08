@@ -23,6 +23,7 @@ impl Consensus {
     pub async fn run(
         name: PublicKey,
         committee: Committee,
+        ba_committee: Committee,
         parameters: Parameters,
         store: Store,
         signature_service: SignatureService,
@@ -52,6 +53,7 @@ impl Consensus {
         );
 
         let (tx_network, rx_network) = channel(10000);
+        let (tx_ba_network, rx_ba_network) = channel(10000);
     
         let (tx_mvba_filter, rx_mvba_filter) = channel(10000);
         let (tx_ba_filter, rx_ba_filter) = channel(10000);
@@ -64,6 +66,7 @@ impl Consensus {
             x.set_ip("0.0.0.0".parse().unwrap());
             x
         })?;
+
         let network_receiver = NetReceiver::new(address, tx_core.clone());
         tokio::spawn(async move {
             network_receiver.run().await;
@@ -75,7 +78,20 @@ impl Consensus {
         });
 
         // Make network sender and receiver for ABA.
+        let ba_address = ba_committee.address(&name).map(|mut x| {
+            x.set_ip("0.0.0.0".parse().unwrap());
+            x
+        })?;
         
+        let ba_network_receiver = NetReceiver::new(ba_address, tx_ba_core.clone());
+        tokio::spawn(async move {
+            ba_network_receiver.run().await;
+        });
+
+        let mut ba_network_sender = NetSender::new(rx_ba_network);
+        tokio::spawn(async move {
+            ba_network_sender.run().await;
+        });
 
         // Make the mempool driver which will mediate our requests to the mempool.
         let mempool_driver = MempoolDriver::new(tx_consensus_mempool);
@@ -83,7 +99,7 @@ impl Consensus {
         // Custom filter to arbitrary delay network messages.
         let mut consensus_filter = Filter::<ConsensusMessage> {
             from: rx_mvba_filter, 
-            to: tx_network.clone(),
+            to: tx_network,
             parameters: parameters.clone() 
         };
         tokio::spawn(async move {
@@ -93,7 +109,7 @@ impl Consensus {
         // Init BA message filter.
         let mut ba_filter = Filter::<BAMessage> { 
             from: rx_ba_filter, 
-            to: tx_network,
+            to: tx_ba_network,
             parameters: parameters.clone() 
         };
         tokio::spawn(async move {

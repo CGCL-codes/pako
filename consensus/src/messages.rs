@@ -4,7 +4,7 @@ use crypto::{Digest, Signature, SignatureService, Hash, PublicKey};
 use ed25519_dalek::Digest as _;
 use ed25519_dalek::Sha512;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashSet, BTreeMap};
+use std::collections::HashSet;
 use std::convert::TryInto;
 use std::fmt;
 use threshold_crypto::{SignatureShare, PublicKeySet};
@@ -54,7 +54,7 @@ pub enum ConsensusMessage {
     Val(Block),
     Echo(Echo),
     Finish(Finish),
-    Halt(Block),
+    Halt(Block, bool),
     RandomnessShare(RandomnessShare),
     RandomCoin(RandomCoin),
     PreVote(PreVote),
@@ -69,7 +69,7 @@ impl fmt::Display for ConsensusMessage {
                 ConsensusMessage::Val(_) => "VAL",
                 ConsensusMessage::Echo(_) => "ECHO",
                 ConsensusMessage::Finish(_) => "FINISH",
-                ConsensusMessage::Halt(_) => "HALT",
+                ConsensusMessage::Halt(_, _) => "HALT",
                 ConsensusMessage::RandomnessShare(_) => "RANDOMNESS_SHARE",
                 ConsensusMessage::RandomCoin(_) => "RANDOM_COIN",
                 ConsensusMessage::PreVote(_) => "PREVOTE",
@@ -337,7 +337,7 @@ pub struct RandomnessShare {
     pub view: ViewNumber, // view
     pub author: PublicKey,
     pub signature_share: SignatureShare,
-    pub optimistic_sigma1: Option<Block>,
+    pub vote: bool,
 }
 
 impl RandomnessShare {
@@ -345,7 +345,7 @@ impl RandomnessShare {
         epoch: EpochNumber,
         view: ViewNumber,
         author: PublicKey,
-        optimistic_sigma1: Option<Block>,
+        vote: bool,
         mut signature_service: SignatureService,
     ) -> Self {
         let digest = digest!(epoch.to_le_bytes(), view.to_le_bytes(), "RANDOMNESS_SHARE");
@@ -355,7 +355,7 @@ impl RandomnessShare {
             view,
             author,
             signature_share,
-            optimistic_sigma1,
+            vote,
         }
     }
 
@@ -384,11 +384,6 @@ impl RandomnessShare {
             share.verify(&self.signature_share, &self.digest()),
             ConsensusError::InvalidSignatureShare(self.author)
         );
-        ensure!(
-            self.optimistic_sigma1.as_ref()
-                .map_or_else(|| true, |b| b.check_sigma1(&pk_set.public_key())),
-            ConsensusError::InvalidThresholdSignature(self.author)
-        );
 
         Ok(())
     }
@@ -410,12 +405,13 @@ impl fmt::Debug for RandomnessShare {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize, Default)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct RandomCoin {
+    pub author: PublicKey,
     pub epoch: EpochNumber, // epoch
     pub view: ViewNumber, // view
-    pub leader: PublicKey,  // elected leader of the view
-    pub shares: Vec<RandomnessShare>,
+    pub fallback_leader: PublicKey,  // elected leader of the view
+    pub threshold_sig: threshold_crypto::Signature, // combined signature 
 }
 
 impl RandomCoin {
@@ -426,43 +422,25 @@ impl RandomCoin {
         halt_mark: EpochNumber, 
         epochs_halted: &HashSet<EpochNumber>
     ) -> ConsensusResult<()> {
-        // Check for epoch.
+        // Check epoch.
         ensure!(
             self.epoch > halt_mark && !epochs_halted.contains(&self.epoch),
             ConsensusError::MessageWithHaltedEpoch(self.epoch, halt_mark+1)
         );
 
-        // Ensure the QC has a quorum.
-        let mut weight = 0;
-        let mut used = HashSet::new();
-        for share in self.shares.iter() {
-            let name = share.author;
-            ensure!(!used.contains(&name), ConsensusError::AuthorityReuseinCoin(name));
-            let voting_rights = committee.stake(&name);
-            ensure!(voting_rights > 0, ConsensusError::UnknownAuthority(name));
-            used.insert(name);
-            weight += voting_rights;
-        }
+        // Check threshold signature.
+        let digest = digest!(self.epoch.to_le_bytes(), self.view.to_le_bytes(), "RANDOMNESS_SHARE");
         ensure!(
-            weight >= committee.random_coin_threshold(),
-            ConsensusError::RandomCoinRequiresQuorum
+            pk_set.public_key().verify(&self.threshold_sig, digest),
+            ConsensusError::InvalidThresholdSignature(self.author)
         );
 
-        let mut sigs = BTreeMap::new();
-        // Check the random shares.
-        for share in &self.shares {
-            share.verify(committee, pk_set, halt_mark, epochs_halted)?;
-            sigs.insert(committee.id(share.author), share.signature_share.clone());
-        }
-        if let Ok(sig) = pk_set.combine_signatures(sigs.iter()) {
-            let id = usize::from_be_bytes((&sig.to_bytes()[0..8]).try_into().unwrap()) % committee.size();
-            let mut keys: Vec<_> = committee.authorities.keys().cloned().collect();
-            keys.sort();
-            let leader = keys[id];
-            ensure!(leader == self.leader, ConsensusError::RandomCoinWithWrongLeader);
-        } else {
-            ensure!(true, ConsensusError::RandomCoinWithWrongShares);
-        }
+        // Check leader.
+        let id = usize::from_be_bytes((&self.threshold_sig.to_bytes()[0..8]).try_into().unwrap()) % committee.size();
+        let mut keys: Vec<_> = committee.authorities.keys().cloned().collect();
+        keys.sort();
+        let leader = keys[id];
+        ensure!(leader == self.fallback_leader, ConsensusError::RandomCoinWithWrongLeader);
 
         Ok(())
     }
@@ -470,7 +448,7 @@ impl RandomCoin {
 
 impl fmt::Debug for RandomCoin {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
-        write!(f, "RandomCoin(epoch {}, view {}, leader {})", self.epoch, self.view, self.leader)
+        write!(f, "RandomCoin(epoch {}, view {}, leader {})", self.epoch, self.view, self.fallback_leader)
     }
 }
 

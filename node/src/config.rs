@@ -75,6 +75,7 @@ impl Export for SecretShare {}
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct Committee {
     pub consensus: ConsensusCommittee,
+    pub aba: ConsensusCommittee,
     pub mempool: MempoolCommittee,
 }
 

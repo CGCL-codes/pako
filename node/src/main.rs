@@ -131,7 +131,19 @@ fn deploy_testbed(nodes: usize) -> Result<Vec<JoinHandle<()>>, Box<dyn std::erro
                 let name = key.name;
                 let stake = 1;
                 let addresses = format!("127.0.0.1:{}", 13200 + i).parse().unwrap();
-                (name, i, stake, addresses)  // daniel: not implemented for tss yet
+                (name, i, stake, addresses) 
+            })
+            .collect(),
+        epoch,
+    );
+    let ba_committee = ConsensusCommittee::new(
+        keys.iter()
+            .enumerate()
+            .map(|(i, key)| {
+                let name = key.name;
+                let stake = 1;
+                let addresses = format!("127.0.0.1:{}", 13300 + i).parse().unwrap();
+                (name, i, stake, addresses)  
             })
             .collect(),
         epoch,
@@ -141,6 +153,7 @@ fn deploy_testbed(nodes: usize) -> Result<Vec<JoinHandle<()>>, Box<dyn std::erro
     Committee {
         mempool: mempool_committee,
         consensus: consensus_committee,
+        aba: ba_committee,
     }
     .write(committee_file)?;
 
