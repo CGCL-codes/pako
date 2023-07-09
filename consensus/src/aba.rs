@@ -267,7 +267,7 @@ impl BinaryAgreement {
                     conf.epoch,
                     conf.view, 
                     self.name, 
-                    false,
+                    None,
                     self.signature_service.clone()
                 ).await;
                 self.broadcast_random_share(randomness_share).await

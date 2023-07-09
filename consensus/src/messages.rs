@@ -54,11 +54,13 @@ pub enum ConsensusMessage {
     Val(Block),
     Echo(Echo),
     Finish(Finish),
-    Halt(Block, bool),
+    Halt(Halt),
     RandomnessShare(RandomnessShare),
     RandomCoin(RandomCoin),
     PreVote(PreVote),
     Vote(Vote),
+    RequestHelp(EpochNumber, PublicKey),
+    Help(Block),
 }
 
 impl fmt::Display for ConsensusMessage {
@@ -69,11 +71,13 @@ impl fmt::Display for ConsensusMessage {
                 ConsensusMessage::Val(_) => "VAL",
                 ConsensusMessage::Echo(_) => "ECHO",
                 ConsensusMessage::Finish(_) => "FINISH",
-                ConsensusMessage::Halt(_, _) => "HALT",
+                ConsensusMessage::Halt(_) => "HALT",
                 ConsensusMessage::RandomnessShare(_) => "RANDOMNESS_SHARE",
                 ConsensusMessage::RandomCoin(_) => "RANDOM_COIN",
                 ConsensusMessage::PreVote(_) => "PREVOTE",
                 ConsensusMessage::Vote(_) => "VOTE",
+                ConsensusMessage::RequestHelp(_, _) => "REQUEST_HELP",
+                ConsensusMessage::Help(_) => "HELP",
             }           
         )
     }
@@ -337,7 +341,7 @@ pub struct RandomnessShare {
     pub view: ViewNumber, // view
     pub author: PublicKey,
     pub signature_share: SignatureShare,
-    pub vote: bool,
+    pub optimistic_sigma1: Option<Block>,
 }
 
 impl RandomnessShare {
@@ -345,7 +349,7 @@ impl RandomnessShare {
         epoch: EpochNumber,
         view: ViewNumber,
         author: PublicKey,
-        vote: bool,
+        optimistic_sigma1: Option<Block>,
         mut signature_service: SignatureService,
     ) -> Self {
         let digest = digest!(epoch.to_le_bytes(), view.to_le_bytes(), "RANDOMNESS_SHARE");
@@ -355,7 +359,7 @@ impl RandomnessShare {
             view,
             author,
             signature_share,
-            vote,
+            optimistic_sigma1,
         }
     }
 
@@ -385,7 +389,10 @@ impl RandomnessShare {
             ConsensusError::InvalidSignatureShare(self.author)
         );
 
-        Ok(())
+        // Check optimistic block.
+        self.optimistic_sigma1
+            .as_ref()
+            .map_or_else(|| Ok(()), |b| b.verify(committee, halt_mark, epochs_halted))
     }
 }
 
@@ -661,5 +668,43 @@ impl fmt::Debug for Vote {
                 VoteEnum::No(_, _) => "NO",
             }
         )
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct Halt {
+    pub block: Block,
+    pub is_optimistic: bool,
+}
+
+impl Halt {
+    pub fn verify(
+        &self, 
+        committee: &Committee, 
+        pk_set: &PublicKeySet,
+        halt_mark: EpochNumber, 
+        epochs_halted: &HashSet<EpochNumber>
+    ) -> ConsensusResult<()> {
+        // If halt from optimistic path, check leader.
+        if self.is_optimistic {
+            let leader = committee
+            .get_public_key(self.block.epoch as usize % committee.size())
+            .unwrap();
+
+            ensure!(
+                leader == self.block.author,
+                ConsensusError::InvalidOptimisticHalt
+            )
+        }
+
+        // Verify block.
+        self.block.verify(committee, halt_mark, epochs_halted)?;
+        ensure!(
+            self.block.check_sigma1(&pk_set.public_key()) &&
+            if !self.is_optimistic {self.block.check_sigma2(&pk_set.public_key())} else {true},
+            ConsensusError::InvalidSignatureShare(self.block.author)
+        );
+
+        Ok(())
     }
 }

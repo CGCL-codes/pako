@@ -94,4 +94,7 @@ pub enum ConsensusError {
 
     #[error("Invalid payload")]
     InvalidPayload,
+
+    #[error("Invalid optimistic halt")]
+    InvalidOptimisticHalt
 }

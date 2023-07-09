@@ -31,13 +31,14 @@ pub struct Core {
     network_filter: Sender<ConsensusFilterInput>,
 
     core_channel: Receiver<ConsensusMessage>,
-    aba_sync_sender: Sender<(EpochNumber, bool)>, // invoke aba, wait for done
-    aba_sync_feedback_receiver: Receiver<(EpochNumber, bool)>, // read aba feedback
+    aba_sync_sender: Sender<(EpochNumber, Arc<Mutex<BAState>>)>, // invoke aba, wait for done
+    aba_sync_feedback_receiver: Receiver<(EpochNumber, bool)>,
     halt_channel: Sender<(Arc<Mutex<ElectionState>>, Block)>, // handle halts
-    advance_channel: Receiver<Block>, // propose block for next epoch
+    advance_channel: Receiver<Halt>, // propose block for next epoch
     commit_channel: Sender<Block>,
 
     votes_aggregators: HashMap<(EpochNumber, Digest), Aggregator<ConsensusMessage>>, // n-f votes collector
+    first_view_coins: HashMap<EpochNumber, RandomCoin>,  // store first-view coins to help enter fallback
     election_states: HashMap<(EpochNumber, ViewNumber), Arc<Mutex<ElectionState>>>, // stores states of leader election
     ba_states: HashMap<EpochNumber, Arc<Mutex<BAState>>>, // store states of ABA, indicating whether ABA result is arrived
     blocks_received: HashMap<(PublicKey, EpochNumber, ViewNumber), Block>,  // blocks received from others and the node itself, will be updated as consensus proceeds
@@ -62,14 +63,15 @@ impl Core {
         network_filter: Sender<ConsensusFilterInput>,
         commit_channel: Sender<Block>,
     ) -> Self {
-        let (tx_halt, mut rx_halt): (_, Receiver<(Arc<Mutex<ElectionState>>, Block)>) = channel(10000);
-        let (tx_advance, rx_advance): (Sender<Block>, _) = channel(10000);
-        let (aba_sync_sender, mut aba_sync_receiver)  = channel(10000);
-        let (aba_sync_feedback_sender, mut aba_sync_feedback_receiver) = channel(10000);
+        let (tx_halt, rx_halt): (_, Receiver<(Arc<Mutex<ElectionState>>, Block)>) = channel(10000);
+        let (tx_advance, rx_advance) = channel(10000);
+        let (aba_sync_sender, aba_sync_receiver)  = channel(10000);
+        let (aba_sync_feedback_sender, aba_sync_feedback_receiver)  = channel(10000);
 
         // Handle Halt till receives the leader.
+        let tx_advance_cloned = tx_advance.clone();
         tokio::spawn(async move {
-            Synchronizer::run_sync_halt(rx_halt, tx_advance).await;
+            Synchronizer::run_sync_halt(rx_halt, tx_advance_cloned).await;
         });
 
         // ABA synchronization.
@@ -77,8 +79,9 @@ impl Core {
             Synchronizer::run_sync_aba(
                 aba_channel,
                 aba_feedback_channel,
+                aba_sync_receiver,
                 aba_sync_feedback_sender,
-                aba_sync_receiver
+                tx_advance,
             ).await;
         });
 
@@ -99,6 +102,7 @@ impl Core {
             advance_channel: rx_advance,
             votes_aggregators: HashMap::new(),
             election_states: HashMap::new(),
+            first_view_coins: HashMap::new(),
             ba_states: HashMap::new(),
             blocks_received: HashMap::new(),
             halt_mark: 0,
@@ -362,7 +366,7 @@ impl Core {
                             match &echo.optimistic_block {
                                 // Halt from optimistic path.
                                 Some(block) => {
-                                    self.handle_halt(block.clone(), true).await
+                                    self.handle_halt(Halt{block: block.clone(), is_optimistic: true}).await
                                 },
                                 // Finish SPB.
                                 None => self.finish(&block).await
@@ -417,23 +421,23 @@ impl Core {
             None => Ok(()),
 
             Some(_) => {
-                let vote = match self.get_block(
+                let optimistic_block = match self.get_block(
                         self.get_optimistic_leader(finish.0.epoch), 
                         finish.0.epoch, 
                         finish.0.view
                     ) {
                         Some(block) => match &block.proof {
-                            Proof::Sigma(_, _) => true,
-                            _ => false,
+                            Proof::Sigma(_, _) => Some(block.clone()),
+                            _ => None,
                         },
-                        _ => false,
+                        _ => None,
                     };
 
                 let randomness_share = RandomnessShare::new(
                     finish.0.epoch,
                     finish.0.view, 
                     self.name, 
-                    vote,
+                    optimistic_block,
                     self.signature_service.clone()
                 ).await;
 
@@ -483,8 +487,17 @@ impl Core {
 
                 // If view = 1, Invoke ABA.
                 if randomness_share.view == 1 {
-                    let vote = shares.iter().find(|s| s.vote).is_some();
-                    self.invoke_ba(randomness_share.epoch, vote).await;
+                    let optimistic_sigma1 = shares.iter().find_map(|s| s.optimistic_sigma1.clone());
+                    let ba_state = Arc::new(Mutex::new(
+                        BAState { 
+                            consistent: None, 
+                            optimistic_sigma1, 
+                            wakers: Vec::new(), 
+                            epoch: randomness_share.epoch 
+                        }
+                    ));
+                    self.ba_states.insert(randomness_share.epoch, ba_state.clone());
+                    self.invoke_ba(randomness_share.epoch, ba_state).await;
                 }
 
                 // Combine shares into a complete signature.
@@ -507,16 +520,19 @@ impl Core {
                     fallback_leader: leader, 
                     threshold_sig: threshold_signature,
                 };
-                self.handle_random_coin(&random_coin).await
+                self.handle_random_coin(&random_coin).await?;
+                self.first_view_coins.insert(randomness_share.epoch, random_coin);
+
+                Ok(())
             },
         }
 
     }
 
-    async fn invoke_ba(&self, epoch: EpochNumber, vote: bool) {
+    async fn invoke_ba(&self, epoch: EpochNumber, ba_state: Arc<Mutex<BAState>>) {
         // Send vote to ABA.
         self.aba_sync_sender
-            .send((epoch, vote))
+            .send((epoch, ba_state))
             .await.expect(&format!("Failed to invoke aba at epoch {}", epoch));
     }
 
@@ -580,7 +596,7 @@ impl Core {
             });
 
         if let Some(leader_finish) = leader_finish {
-            self.handle_halt(leader_finish.0.clone(), false).await?;
+            self.handle_halt(Halt{block: leader_finish.0.clone(), is_optimistic: false}).await?;
         }
 
         // Enter two-vote phase.
@@ -758,7 +774,7 @@ impl Core {
                         if let Proof::Sigma(sigma1, _) = &block.proof {
                             let mut completed_block = block.clone();
                             completed_block.proof = Proof::Sigma(sigma1.clone(), Some(sigma2));
-                            self.handle_halt(completed_block, false).await?;
+                            self.handle_halt(Halt{block: completed_block, is_optimistic: false}).await?;
                         }
                     }
                 } 
@@ -811,59 +827,85 @@ impl Core {
         }
     }
 
-    async fn handle_halt(&mut self, block: Block, is_optimistic: bool) -> ConsensusResult<()> {
-        block.verify(&self.committee, self.halt_mark, &self.epochs_halted)?;
+    async fn handle_request_help(&self, epoch: EpochNumber, requester: PublicKey) -> ConsensusResult<()> {
+        if let Some(block) = self.get_block(self.get_optimistic_leader(epoch), epoch, 1) {
+            if let Proof::Sigma(_, _) = block.proof {
+                self.transmit(ConsensusMessage::Help(block.clone()), Some(&requester)).await?;
+            }
+        }
+        Ok(())
+    }
 
+    async fn handle_help(&mut self, optimistic_sigma1: Block) -> ConsensusResult<()> {
+        // Verify optimistic sigma1 from others to help commit from optimistic path.
+        optimistic_sigma1.verify(&self.committee, self.halt_mark, &self.epochs_halted)?;
         ensure!(
-            block.check_sigma1(&self.pk_set.public_key()),
-            ConsensusError::InvalidVoteProof(block.proof)
+            optimistic_sigma1.check_sigma1(&self.pk_set.public_key()),
+            ConsensusError::InvalidSignatureShare(optimistic_sigma1.author)
         );
 
-        // Forward Halt to others.
-        self.transmit(ConsensusMessage::Halt(block.clone(), is_optimistic), None).await
-            .expect(&format!("Failed to forward Halt of epoch {}", block.epoch));
+        // Modify ba_state to wake up BAFuture in aba sync task.
+        let mut ba_state = self.ba_states.get_mut(&optimistic_sigma1.epoch)
+            .unwrap()
+            .lock()
+            .unwrap();
+        if ba_state.optimistic_sigma1.is_none() {
+            ba_state.optimistic_sigma1 = Some(optimistic_sigma1);
+            while let Some(waker) = ba_state.wakers.pop() {
+                waker.wake();
+            }
+        }
 
-        // If halt from optimistic path, commit directly.
-        // Otherwise, we should not halt until the fallbacker leader is revealed.
-        if is_optimistic {
-            self.advance(block).await?;
+        Ok(())
+    }
+
+    async fn handle_halt(&mut self, halt: Halt) -> ConsensusResult<()> {
+        halt.verify(&self.committee, &self.pk_set, self.halt_mark, &self.epochs_halted)?;
+
+        if halt.is_optimistic {
+            // If receive optimistic halt from others, commit directly.
+            self.advance(halt).await?;
         } else {
-            ensure!(
-                block.check_sigma2(&self.pk_set.public_key()),
-                ConsensusError::InvalidVoteProof(block.proof)
-            );
             let election_state = self.election_states
-            .entry((block.epoch, block.view))
+            .entry((halt.block.epoch, halt.block.view))
             .or_insert(Arc::new(Mutex::new(
                 ElectionState { coin: None, wakers: Vec::new() }
             )))
             .clone();
 
-            self.halt_channel.send((election_state, block)).await.expect("Failed to send Halt through halt channel.");
+            self.halt_channel.send((election_state, halt.block)).await
+                .expect("Failed to send Halt through halt channel.");
         }
         Ok(())
     }
 
-    async fn advance(&mut self, block: Block) -> ConsensusResult<()> {
+    async fn advance(&mut self, halt: Halt) -> ConsensusResult<()> {
         // Output block with payloads.
-        if let Err(e) = self.commit_channel.send(block.clone()).await {
+        if let Err(e) = self.commit_channel.send(halt.block.clone()).await {
             panic!("Failed to send message through commit channel: {}", e);
         } else {
             info!("Commit block {} of member {} in epoch {}, view {}", 
-                block.digest(),
-                block.author,
-                block.epoch,
-                block.view,
+            halt.block.digest(),
+            halt.block.author,
+            halt.block.epoch,
+            halt.block.view,
             );
         }
 
         // Clean up mempool.
-        self.cleanup_epoch(&block).await?;
+        self.cleanup_epoch(&halt.block).await?;
 
         // Start new epoch.
-        let new_block = self.generate_block(block.epoch+1, 1, Proof::Pi(Vec::new())).await
-            .expect(&format!("Failed to generate block of epoch {}", block.epoch));
-        self.spb(new_block).await
+        let new_block = self.generate_block(halt.block.epoch+1, 1, Proof::Pi(Vec::new())).await
+            .expect(&format!("Failed to generate block of epoch {}", halt.block.epoch));
+        self.spb(new_block).await?;
+
+        // Forward Halt to others.
+        let epoch = halt.block.epoch.clone();
+        self.transmit(ConsensusMessage::Halt(halt), None).await
+            .expect(&format!("Failed to forward Halt of epoch {}", epoch));
+
+        Ok(())
 
     }
 
@@ -898,24 +940,26 @@ impl Core {
                         ConsensusMessage::Val(block) => self.handle_val(block).await,
                         ConsensusMessage::Echo(echo) => self.handle_echo(&echo).await,
                         ConsensusMessage::Finish(finish) => self.handle_finish(&finish).await,
-                        ConsensusMessage::Halt(block, is_optimistic) => self.handle_halt(block, is_optimistic).await,
+                        ConsensusMessage::Halt(halt) => self.handle_halt(halt).await,
                         ConsensusMessage::RandomnessShare(randomness_share) => self.handle_randommess_share(&randomness_share).await,
                         ConsensusMessage::RandomCoin(random_coin) => self.handle_random_coin(&random_coin).await,
                         ConsensusMessage::PreVote(prevote) => self.handle_prevote(&prevote).await,
                         ConsensusMessage::Vote(vote) => self.handle_vote(vote).await,
+                        ConsensusMessage::RequestHelp(epoch, requester) => self.handle_request_help(epoch, requester).await,
+                        ConsensusMessage::Help(optimistic_sigma1) => self.handle_help(optimistic_sigma1).await,
                     }
                 },
-                Some(block) = self.advance_channel.recv() => {                    
-                    self.advance(block).await
+                Some(halt) = self.advance_channel.recv() => {                    
+                    self.advance(halt).await
                 },
-                Some((epoch, vote)) = self.aba_sync_feedback_receiver.recv() => {
-                    if vote {
-                    // TODO: Send (epoch, vote) to optimistic halt channel.
+                Some((epoch, is_optimistic_path_success)) = self.aba_sync_feedback_receiver.recv() => {
+                    if is_optimistic_path_success {
+                        // Request help for commiting from optimistic path.
+                        self.transmit(ConsensusMessage::RequestHelp(epoch, self.name), None).await
                     } else {
-                        let coin = self.election_states.get_mut(&(epoch, 1)).unwrap().lock().unwrap().coin.clone().unwrap();
-                        self.start_fallback(&coin);
+                        let coin = self.first_view_coins.get(&epoch).unwrap().clone();
+                        self.start_fallback(&coin).await
                     }
-                    Ok(())
                 },
                 else => break,
             };
