@@ -288,12 +288,6 @@ impl Core {
 
         // Handle optimistic echo.
         if let Some(b) = optimistic_block {
-            // Add echo for the node itself.
-            self.votes_aggregators
-                .entry((echo.epoch, echo.digest()))
-                .or_insert_with(|| Aggregator::<ConsensusMessage>::new())
-                .append(self.name, ConsensusMessage::Echo(echo.clone()), self.committee.stake(&echo.author))?;
-            
             // Update block of optimistic leader in PB phase 2
             if let PBPhase::Phase2 = phase {
                 self.update_block(b);
@@ -373,7 +367,7 @@ impl Core {
                             block.proof = Proof::Sigma(sigma1, Some(threshold_signature));     
                             match &echo.optimistic_block {
                                 // Halt from optimistic path.
-                                Some(block) => {
+                                Some(_) => {
                                     self.handle_halt(Halt{block: block.clone(), is_optimistic: true}).await
                                 },
 
@@ -394,13 +388,10 @@ impl Core {
         // Update proof of the block of the node's own.
         self.update_block(block.clone());
         
-        // Collect the node's own finish.
+        // Handle finish.
         let finish = Finish(block.clone());
-        self.votes_aggregators
-            .entry((finish.0.epoch, finish.digest()))
-            .or_insert_with(|| Aggregator::<ConsensusMessage>::new())
-            .append(finish.0.author, ConsensusMessage::Finish(finish.clone()), self.committee.stake(&finish.0.author))?;
-
+        self.handle_finish(&finish).await?;
+        
         // Broadcast Finish to all nodes.
         let message = ConsensusMessage::Finish(finish);
         self.transmit(message, None).await
@@ -449,17 +440,8 @@ impl Core {
                     optimistic_block,
                     self.signature_service.clone()
                 ).await;
-
-                // Collect the node's own randomness share.
-                self.votes_aggregators
-                    .entry((randomness_share.epoch, randomness_share.digest()))
-                    .or_insert_with(|| Aggregator::<ConsensusMessage>::new())
-                    .append(randomness_share.author, 
-                        ConsensusMessage::RandomnessShare(randomness_share.clone()), 
-                        self.committee.stake(&randomness_share.author))?;
-
-                let message = ConsensusMessage::RandomnessShare(randomness_share.clone());
-                self.transmit(message, None).await
+                self.handle_randommess_share(&randomness_share).await?;
+                self.transmit(ConsensusMessage::RandomnessShare(randomness_share.clone()), None).await
             },
         }
     }
@@ -497,6 +479,7 @@ impl Core {
                 // If view = 1, Invoke ABA.
                 if randomness_share.view == 1 {
                     let optimistic_sigma1 = shares.iter().find_map(|s| s.optimistic_sigma1.clone());
+                    debug!("Invoke binary agreement of epoch {}, vote: {}", randomness_share.epoch, optimistic_sigma1.is_some());
                     let ba_state = Arc::new(Mutex::new(
                         BAState { 
                             consistent: None, 
@@ -540,7 +523,6 @@ impl Core {
 
     async fn invoke_ba(&self, epoch: EpochNumber, ba_state: Arc<Mutex<BAState>>) {
         // Send vote to ABA.
-        debug!("Invoke binary agreement of epoch {}", epoch);
         self.aba_sync_sender
             .send((epoch, ba_state))
             .await.expect(&format!("Failed to invoke aba at epoch {}", epoch));
@@ -642,16 +624,7 @@ impl Core {
             leader: random_coin.fallback_leader,
             body,
         };
-        // Collect the node's own Prevote.
-        self.votes_aggregators
-            .entry((prevote.epoch, prevote.digest()))
-            .or_insert_with(|| Aggregator::<ConsensusMessage>::new())
-            .append(prevote.author, ConsensusMessage::PreVote(
-                prevote.clone()), 
-                self.committee.stake(&prevote.author
-            ))?;
-
-        // Broadcast PreVote message if leader's Finish was not delivered.
+        self.handle_prevote(&prevote).await?;
         self.transmit(ConsensusMessage::PreVote(prevote), None).await
     }
 
@@ -732,19 +705,13 @@ impl Core {
                     leader: prevote.leader,
                     body,
                 };
-
-                // Collect the node's own Vote.
-                self.votes_aggregators
-                    .entry((vote.epoch, vote.digest()))
-                    .or_insert_with(|| Aggregator::<ConsensusMessage>::new())
-                    .append(vote.author, ConsensusMessage::Vote(vote.clone()), self.committee.stake(&vote.author))?;
-
+                self.handle_vote(&vote).await?;
                 self.transmit(ConsensusMessage::Vote(vote), None).await
             },
         }
     }
 
-    async fn handle_vote(&mut self, vote: Vote) -> ConsensusResult<()> {
+    async fn handle_vote(&mut self, vote: &Vote) -> ConsensusResult<()> {
         vote.verify(&self.committee, &self.pk_set, self.halt_mark, &self.epochs_halted)?;
 
         self.votes_aggregators
@@ -958,7 +925,7 @@ impl Core {
                         ConsensusMessage::RandomnessShare(randomness_share) => self.handle_randommess_share(&randomness_share).await,
                         ConsensusMessage::RandomCoin(random_coin) => self.handle_random_coin(&random_coin).await,
                         ConsensusMessage::PreVote(prevote) => self.handle_prevote(&prevote).await,
-                        ConsensusMessage::Vote(vote) => self.handle_vote(vote).await,
+                        ConsensusMessage::Vote(vote) => self.handle_vote(&vote).await,
                         ConsensusMessage::RequestHelp(epoch, requester) => self.handle_request_help(epoch, requester).await,
                         ConsensusMessage::Help(optimistic_sigma1) => self.handle_help(optimistic_sigma1).await,
                     }
