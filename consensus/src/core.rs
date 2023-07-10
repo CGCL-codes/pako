@@ -1,19 +1,16 @@
 use std::collections::{HashMap, BTreeMap, HashSet};
-use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use crate::aggregator::Aggregator;
 use crate::config::{Committee, Parameters, EpochNumber, ViewNumber};
 use crate::filter::ConsensusFilterInput;
 use crate::mempool::MempoolDriver;
-use crate::synchronizer::{ElectionState, ElectionFuture, transmit, Synchronizer, BAState};
+use crate::synchronizer::{ElectionState, transmit, Synchronizer, BAState};
 use crate::error::{ConsensusError, ConsensusResult};
 use crate::messages::*;
 use crypto::Hash as _;
 use crypto::{Digest, PublicKey, SignatureService};
 use ed25519_dalek::Digest as _;
 use ed25519_dalek::Sha512;
-use futures::{StreamExt, Future};
-use futures::stream::FuturesUnordered;
 use log::{debug, warn, error, info};
 use threshold_crypto::PublicKeySet;
 use tokio::sync::mpsc::{Receiver, Sender, channel};
@@ -185,7 +182,7 @@ impl Core {
 
     // Starts the SPB phase.
     async fn spb(&mut self, block: Block) -> ConsensusResult<()> {
-        debug!("Processing {:?}", block);
+        debug!("Processing block {:?}", block);
 
         // Check value.
         ensure!(
@@ -254,8 +251,8 @@ impl Core {
             },
         };
 
-        // Send echo msg.
-        let is_optimistic = self.get_optimistic_leader(block.epoch) == block.author;
+        // Send/Broadcast echo msg.
+        let is_optimistic = block.view == 1 && self.get_optimistic_leader(block.epoch) == block.author;
         self.echo(block.digest(), 
             &block.author, 
             is_optimistic.then(|| block.clone()),
@@ -286,12 +283,21 @@ impl Core {
             self.name, 
             signature_service
         ).await;
-        let message = ConsensusMessage::Echo(echo);
+        let message = ConsensusMessage::Echo(echo.clone());
         self.transmit(message, optimistic_block.is_none().then(|| block_author)).await?;
 
-        // Update block of optimistic leader in PB phase 2.
-        if let PBPhase::Phase2 = phase {
-            optimistic_block.map(|b| self.update_block(b));
+        // Handle optimistic echo.
+        if let Some(b) = optimistic_block {
+            // Add echo for the node itself.
+            self.votes_aggregators
+                .entry((echo.epoch, echo.digest()))
+                .or_insert_with(|| Aggregator::<ConsensusMessage>::new())
+                .append(self.name, ConsensusMessage::Echo(echo.clone()), self.committee.stake(&echo.author))?;
+            
+            // Update block of optimistic leader in PB phase 2
+            if let PBPhase::Phase2 = phase {
+                self.update_block(b);
+            }
         }
 
         Ok(())
@@ -319,7 +325,7 @@ impl Core {
         match shares {
             None => Ok(()),
 
-            // Combine shares into a compete signature.
+            // Combine shares into a complete signature.
             Some(msgs) => {
                 let shares: BTreeMap<_, _> = msgs.into_iter()
                     .filter_map(|s| {
@@ -337,16 +343,17 @@ impl Core {
                 
                 let mut block = match &echo.optimistic_block {
                     Some(block) => block.clone(),
-                    None => self.get_block(echo.block_author, echo.epoch, echo.view).unwrap().clone(),
+                    None => self.get_block(self.name, echo.epoch, echo.view).unwrap().clone(),
                 };
 
                 match echo.phase {
-                    // Update proof with sigma1 and start PB of phase 2.
                     PBPhase::Phase1 => {
+                        // Update proof with sigma1.
                         block.proof = Proof::Sigma(Some(threshold_signature), None);
+
                         match &echo.optimistic_block {
-                            // Broadcast block of optimistic leader with sigma1.
-                            Some(block) => self.echo(
+                            // Forward echo of optimistic block.
+                            Some(_) => self.echo(
                                 block.digest(), 
                                 &block.author, 
                                 Some(block.clone()), 
@@ -355,6 +362,7 @@ impl Core {
                                 block.view, 
                                 self.signature_service.clone(), 
                             ).await,
+
                             // Broadcast the node's own block with sigma1.
                             None => self.pb(&block).await
                         }
@@ -368,6 +376,7 @@ impl Core {
                                 Some(block) => {
                                     self.handle_halt(Halt{block: block.clone(), is_optimistic: true}).await
                                 },
+
                                 // Finish SPB.
                                 None => self.finish(&block).await
                             }       
@@ -424,7 +433,7 @@ impl Core {
                 let optimistic_block = match self.get_block(
                         self.get_optimistic_leader(finish.0.epoch), 
                         finish.0.epoch, 
-                        finish.0.view
+                        1
                     ) {
                         Some(block) => match &block.proof {
                             Proof::Sigma(_, _) => Some(block.clone()),
@@ -531,6 +540,7 @@ impl Core {
 
     async fn invoke_ba(&self, epoch: EpochNumber, ba_state: Arc<Mutex<BAState>>) {
         // Send vote to ABA.
+        debug!("Invoke binary agreement of epoch {}", epoch);
         self.aba_sync_sender
             .send((epoch, ba_state))
             .await.expect(&format!("Failed to invoke aba at epoch {}", epoch));
@@ -896,9 +906,7 @@ impl Core {
         self.cleanup_epoch(&halt.block).await?;
 
         // Start new epoch.
-        let new_block = self.generate_block(halt.block.epoch+1, 1, Proof::Pi(Vec::new())).await
-            .expect(&format!("Failed to generate block of epoch {}", halt.block.epoch));
-        self.spb(new_block).await?;
+        self.start_new_epoch(halt.block.epoch+1).await?;
 
         // Forward Halt to others.
         let epoch = halt.block.epoch.clone();
@@ -907,6 +915,14 @@ impl Core {
 
         Ok(())
 
+    }
+
+    async fn start_new_epoch(&mut self, epoch: EpochNumber) -> ConsensusResult<()> {
+        debug!("Start new epoch {} with optimistic leader {}", epoch, self.get_optimistic_leader(epoch));
+
+        let new_block = self.generate_block(epoch, 1, Proof::Pi(Vec::new())).await
+            .expect(&format!("Failed to generate block of epoch {}", epoch));
+        self.spb(new_block).await
     }
 
     async fn cleanup_epoch(&mut self, block: &Block) -> ConsensusResult<()> {
@@ -919,6 +935,7 @@ impl Core {
         self.blocks_received.retain(|&(_, e, _), _| e != block.epoch);
         self.votes_aggregators.retain(|&(e, _), _| e != block.epoch);
         self.election_states.retain(|&(e, _), _| e != block.epoch);
+        self.first_view_coins.retain(|&e, _| e != block.epoch);
 
         // Clean up payloads.
         self.mempool_driver.cleanup_async(&block).await;
@@ -928,10 +945,7 @@ impl Core {
 
     pub async fn run(&mut self) {
         // Upon booting, generate the very first block.
-        let block = self.generate_block(1, 1, Proof::Pi(Vec::new()))
-            .await
-            .expect("Failed to generate the first block.");
-        self.spb(block).await.expect("Failed to start spb the first block.");
+        self.start_new_epoch(1).await.expect("Failed to start the initial epoch of protocol.");
 
         loop {
             let result = tokio::select! {

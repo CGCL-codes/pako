@@ -119,7 +119,7 @@ impl Consensus {
         // Start main protocol.
         let mut mvba = Core::new(
             name,
-            committee.clone(),
+            committee,
             parameters.clone(),
             signature_service.clone(),
             pk_set.clone(),
@@ -138,7 +138,7 @@ impl Consensus {
         // Start ABA.
         let mut aba = BinaryAgreement::new(
             name,
-            committee,
+            ba_committee,
             parameters,
             pk_set,
             signature_service,

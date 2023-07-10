@@ -246,7 +246,7 @@ impl Echo {
         &self, 
         committee: &Committee,
         pk_set: &PublicKeySet, 
-        leader: PublicKey, 
+        block_author: PublicKey, 
         optimistic_leader: PublicKey,
         halt_mark: EpochNumber, 
         epochs_halted: &HashSet<EpochNumber>
@@ -259,12 +259,12 @@ impl Echo {
 
         // Verify leader.
         ensure!(
-            (self.block_author == leader || self.block_author == optimistic_leader) &&
+            (self.block_author == block_author || self.block_author == optimistic_leader) &&
                 self.optimistic_block.as_ref().map_or(true, |b| b.author == self.block_author),
             ConsensusError::WrongLeader {
                 digest: self.block_digest.clone(),
                 leader: self.block_author,
-                author: leader,
+                author: block_author,
                 epoch: self.epoch,
                 view: self.view,
             }
@@ -295,26 +295,30 @@ impl fmt::Debug for Echo {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
         write!(
             f, 
-            "Echo(author {}, block_author {}, epoch {}, view {}, PBPhase {})", 
+            "Echo(author {}, block_author {}, epoch {}, view {}, PBPhase {}, is optimistic? {})", 
             self.author,
             self.block_author,
             self.epoch,
             self.view,
             self.phase,
+            self.optimistic_block.is_some()
         )
     }
 }
 
 impl Hash for Echo {
     fn digest(&self) -> Digest {
-        // Echo is distinguished by <block_author, epoch, view, phase, ECHO>,
+        // Echo is distinguished by <epoch, view, phase, is_optimistic, ECHO>,
         digest!(
-            self.block_author.0,
             self.epoch.to_le_bytes(),
             self.view.to_le_bytes(),
             match self.phase {
                 PBPhase::Phase1 => &[0],
                 PBPhase::Phase2 => &[1],
+            },
+            match self.optimistic_block {
+                None => &[0],
+                Some(_) => &[1],
             },
             "ECHO"
         )
@@ -408,7 +412,14 @@ impl Hash for RandomnessShare {
 
 impl fmt::Debug for RandomnessShare {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
-        write!(f, "RandomnessShare(author {}, epoch {}, view {})", self.author, self.epoch, self.view)
+        write!(
+            f, 
+            "RandomnessShare(author {}, epoch {}, view {}, has optimistic sigma1? {})", 
+            self.author, 
+            self.epoch, 
+            self.view, 
+            self.optimistic_sigma1.is_some()
+        )
     }
 }
 
