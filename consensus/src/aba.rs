@@ -169,7 +169,10 @@ impl BinaryAgreement {
         let aggregator = self.votes_aggregators
         .entry((val.epoch, val.view, BAPhase::Val))
         .or_insert_with(|| Aggregator::<BAVote>::new());
-
+    
+        if aggregator.used.contains(&val.author) {
+            return Ok(())
+        }
         aggregator.append(val.author, val.clone(), self.committee.stake(&val.author))?;
 
         let forward_prepared = aggregator.is_verified(&self.committee, &val.vote, &self.committee.random_coin_threshold());

@@ -288,6 +288,12 @@ impl Core {
 
         // Handle optimistic echo.
         if let Some(b) = optimistic_block {
+            // Add echo for the node itself.
+            self.votes_aggregators
+                .entry((echo.epoch, echo.digest()))
+                .or_insert_with(|| Aggregator::<ConsensusMessage>::new())
+                .append(self.name, ConsensusMessage::Echo(echo.clone()), self.committee.stake(&echo.author))?;
+
             // Update block of optimistic leader in PB phase 2
             if let PBPhase::Phase2 = phase {
                 self.update_block(b);

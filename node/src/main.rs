@@ -159,7 +159,7 @@ fn deploy_testbed(nodes: usize) -> Result<Vec<JoinHandle<()>>, Box<dyn std::erro
 
     // Prepare for threshold secret shares.
     let mut rng = rand::thread_rng();
-    let sk_set = SecretKeySet::random((nodes-1)/3, &mut rng);
+    let sk_set = SecretKeySet::random(2 * (nodes - 1) / 3, &mut rng);
     let pk_set = sk_set.public_keys();
 
     // Write the key files and spawn all nodes.
