@@ -31,7 +31,7 @@ class TSSKey:
         return cls(data['id'], data['name'], data['secret'])
 
 class Committee:
-    def __init__(self, names, ids, consensus_addr, front_addr, mempool_addr):
+    def __init__(self, names, ids, consensus_addr, aba_addr, front_addr, mempool_addr):
         inputs = [names, consensus_addr, front_addr, mempool_addr]
         assert all(isinstance(x, list) for x in inputs)
         assert all(isinstance(x, str) for y in inputs for x in y)
@@ -40,17 +40,25 @@ class Committee:
         self.names = names
         self.ids = ids
         self.consensus = consensus_addr
+        self.aba = aba_addr
         self.front = front_addr
         self.mempool = mempool_addr
 
         self.json = {
             'consensus': self._build_consensus(),
+            'aba': self._build_aba(),
             'mempool': self._build_mempool()
         }
 
     def _build_consensus(self):
         node = {}
         for a, n, id in zip(self.consensus, self.names, self.ids):
+            node[n] = {'name': n, 'stake': 1, 'address': a, 'id': id}
+        return {'authorities': node, 'epoch': 1}
+    
+    def _build_aba(self):
+        node = {}
+        for a, n, id in zip(self.aba, self.names, self.ids):
             node[n] = {'name': n, 'stake': 1, 'address': a, 'id': id}
         return {'authorities': node, 'epoch': 1}
 
@@ -75,14 +83,16 @@ class Committee:
             data = load(f)
 
         consensus_authorities = data['consensus']['authorities'].values()
+        aba_authorities = data['aba']['authorities'].values()
         mempool_authorities = data['mempool']['authorities'].values()
 
         names = [x['name'] for x in consensus_authorities]
         ids = [x['id'] for x in consensus_authorities]
         consensus_addr = [x['address'] for x in consensus_authorities]
+        aba_addr = [x['address'] for x in aba_authorities]
         front_addr = [x['front_address'] for x in mempool_authorities]
         mempool_addr = [x['mempool_address'] for x in mempool_authorities]
-        return cls(names, ids, consensus_addr, front_addr, mempool_addr)
+        return cls(names, ids, consensus_addr, aba_addr, front_addr, mempool_addr)
 
 
 class LocalCommittee(Committee):
@@ -91,9 +101,10 @@ class LocalCommittee(Committee):
         assert isinstance(port, int)
         size = len(names)
         consensus = [f'127.0.0.1:{port + i}' for i in range(size)]
-        front = [f'127.0.0.1:{port + i + size}' for i in range(size)]
-        mempool = [f'127.0.0.1:{port + i + 2*size}' for i in range(size)]
-        super().__init__(names, ids, consensus, front, mempool)
+        aba = [f'127.0.0.1:{port + i + size}' for i in range(size)]
+        front = [f'127.0.0.1:{port + i + 2*size}' for i in range(size)]
+        mempool = [f'127.0.0.1:{port + i + 3*size}' for i in range(size)]
+        super().__init__(names, ids, consensus, aba, front, mempool)
 
 
 class NodeParameters:

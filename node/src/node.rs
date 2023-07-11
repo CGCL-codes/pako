@@ -107,7 +107,7 @@ impl Node {
     // Print the threshold signature keys to the corresponding files
     pub fn print_threshold_key_file(filenames: Vec<&str>) -> Result<(), NodeError> {
         let size = filenames.len();
-        let threshold = (size - 1) / 3; // The threshold for TSS is f
+        let threshold = 2 * (size - 1) / 3; // The threshold for TSS is n-f
         let mut rng = rand::thread_rng();
         let sk_set = SecretKeySet::random(threshold, &mut rng);
         let pk_set = sk_set.public_keys();

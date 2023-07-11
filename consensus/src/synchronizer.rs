@@ -52,14 +52,6 @@ impl Future for BAFuture {
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let mut ba_state = self.state.lock().unwrap();
 
-        // match &ba_state.optimistic_sigma1 {
-        //     Some(block) => Poll::Ready(block.clone()),
-        //     None => {
-                // ba_state.wakers.push(cx.waker().clone());
-                // Poll::Pending
-        //     }
-        // }
-
         if let Some(vote) = ba_state.consistent {
             if !vote {
                 return Poll::Ready((ba_state.epoch, None));
