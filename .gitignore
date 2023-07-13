@@ -3,3 +3,5 @@
 /target
 db_*
 *.json
+client
+node
