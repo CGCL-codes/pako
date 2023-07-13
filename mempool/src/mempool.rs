@@ -67,7 +67,7 @@ impl Mempool {
 
         let mut network_sender = NetSender::new(rx_network);
         tokio::spawn(async move {
-            network_sender.run().await;
+            network_sender.run(&0).await;
         });
 
         // Build and run the synchronizer.
