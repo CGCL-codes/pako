@@ -63,7 +63,7 @@ impl Consensus {
 
         let mut network_sender = NetSender::new(rx_network);
         tokio::spawn(async move {
-            network_sender.run().await;
+            network_sender.run(&parameters.timeout_delay).await;
         });
 
         // Make the mempool driver which will mediate our requests to the mempool.

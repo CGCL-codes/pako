@@ -22,7 +22,7 @@ async fn send() {
     let (tx, rx) = channel(1);
     let mut sender = NetSender::new(rx);
     tokio::spawn(async move {
-        sender.run().await;
+        sender.run(&0).await;
     });
 
     // Run a TCP server.
@@ -43,7 +43,7 @@ async fn broadcast() {
     let (tx, rx) = channel(1);
     let mut sender = NetSender::new(rx);
     tokio::spawn(async move {
-        sender.run().await;
+        sender.run(&0).await;
     });
 
     // Run 3 TCP servers.
