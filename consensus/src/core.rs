@@ -164,6 +164,17 @@ impl Core {
             self.signature_service.clone(),
         ).await;
 
+        if !block.payload.is_empty() {
+            info!("Created {}", block);
+
+            #[cfg(feature = "benchmark")]
+            for x in &block.payload {
+                info!("Created B{}({})", block.epoch, base64::encode(x));
+            }
+        }
+
+        debug!("Created {:?}", block);
+
         Ok(block)
     }
 
@@ -827,6 +838,11 @@ impl Core {
                 block.epoch,
                 block.view,    
             );
+        }
+
+        #[cfg(feature = "benchmark")]
+        for x in &block.payload {
+            info!("Committed B{}({})", &block.epoch, base64::encode(x));
         }
 
         // Clean up mempool.
