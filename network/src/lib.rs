@@ -1,11 +1,13 @@
 use bytes::Bytes;
 use futures::sink::SinkExt as _;
-use futures::stream::StreamExt as _;
+use futures::stream::{StreamExt as _, FuturesUnordered};
 use log::{debug, info, warn};
 use serde::de::DeserializeOwned;
+use tokio::time::sleep;
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::net::SocketAddr;
+use std::time::Duration;
 use thiserror::Error;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc::{channel, Receiver, Sender};
@@ -39,7 +41,7 @@ impl NetSender {
     // by a separate thread (called worker). We communicate with our workers
     // with a dedicated channel kept by the HashMap called `senders`. If the
     // a connection die, we make a new one.
-    pub async fn run(&mut self) {
+    pub async fn run(&mut self, retry: &u64) {
         let mut senders = HashMap::<_, Sender<_>>::new();
         while let Some(NetMessage(bytes, addresses)) = self.transmit.recv().await {
             for address in addresses {
@@ -48,20 +50,43 @@ impl NetSender {
                     None => true,
                 };
                 if spawn {
-                    let tx = Self::spawn_worker(address).await;
+                    let started = senders.contains_key(&address);
+                    let tx = Self::spawn_worker(address, started, retry).await;
                     if let Ok(()) = tx.send(bytes.clone()).await {
                         senders.insert(address, tx);
                     }
+                    // if !senders.contains_key(&address) {
+                    //     while tx.send(bytes.clone()).await.is_err() {
+                    //         tx = Self::spawn_worker(address).await;
+                    //     }
+                    //     senders.insert(address, tx);
+                    // }
                 }
             }
         }
     }
 
-    async fn spawn_worker(address: SocketAddr) -> Sender<Bytes> {
+    async fn spawn_worker(address: SocketAddr, started: bool, retry: &u64) -> Sender<Bytes> {
         // Each worker handle a TCP connection with on address.
         let (tx, mut rx) = channel(10000);
+
+        let mut stream = TcpStream::connect(address).await;
+        // In startup, ensure every node connects to others.
+        if !started {
+            for count in 0..5 {
+                match &stream {
+                    Err(e) => {
+                        warn!("Failed to connect to {} in startup: {}, retry {}", address, e, count + 1);
+                        sleep(Duration::from_millis(*retry)).await;
+                        stream = TcpStream::connect(address).await;
+                    }
+                    Ok(_) => break,
+                }
+            }
+        }
+
         tokio::spawn(async move {
-            let stream = match TcpStream::connect(address).await {
+            let stream = match stream {
                 Ok(stream) => {
                     info!("Outgoing connection established with {}", address);
                     stream

@@ -74,7 +74,7 @@ impl Consensus {
 
         let mut network_sender = NetSender::new(rx_network);
         tokio::spawn(async move {
-            network_sender.run().await;
+            network_sender.run(&parameters.timeout_delay).await;
         });
 
         // Make network sender and receiver for ABA.
@@ -90,7 +90,7 @@ impl Consensus {
 
         let mut ba_network_sender = NetSender::new(rx_ba_network);
         tokio::spawn(async move {
-            ba_network_sender.run().await;
+            ba_network_sender.run(&parameters.timeout_delay).await;
         });
 
         // Make the mempool driver which will mediate our requests to the mempool.
