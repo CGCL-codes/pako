@@ -3,3 +3,6 @@
 /target
 db_*
 *.json
+benchmark/client
+benchmark/node
+benchmark/results

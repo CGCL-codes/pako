@@ -16,8 +16,8 @@ class AWSError(Exception):
 
 
 class InstanceManager:
-    INSTANCE_NAME = 'async-hotstuff-node'
-    SECURITY_GROUP_NAME = 'async-hotstuff'
+    INSTANCE_NAME = 'sMVBA-node'
+    SECURITY_GROUP_NAME = 'sMVBA'
 
     def __init__(self, settings):
         assert isinstance(settings, Settings)
@@ -68,7 +68,7 @@ class InstanceManager:
 
     def _create_security_group(self, client):
         client.create_security_group(
-            Description='HotStuff node',
+            Description='sMVBA node',
             GroupName=self.SECURITY_GROUP_NAME,
         )
 
@@ -132,10 +132,15 @@ class InstanceManager:
 
     def _get_ami(self, client):
         # The AMI changes with regions.
+        # print(client.describe_images(
+        #     ImageIds=[
+        #         'ami-01e076d5c9e040974',
+        #     ],
+        # ))
         response = client.describe_images(
             Filters=[{
                 'Name': 'description',
-                'Values': ['Canonical, Ubuntu, 20.04 LTS, amd64 focal image build on 2020-10-26']
+                'Values': ['Canonical, Ubuntu, 20.04 LTS, amd64 focal image build on 2023-06-30']
             }]
         )
         return response['Images'][0]['ImageId']

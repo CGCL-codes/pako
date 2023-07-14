@@ -1,7 +1,7 @@
 from os import error
 from fabric import Connection, ThreadingGroup as Group
 from fabric.exceptions import GroupException
-from paramiko import RSAKey
+from paramiko import Ed25519Key
 from paramiko.ssh_exception import PasswordRequiredException, SSHException
 from os.path import basename, splitext
 from time import sleep
@@ -34,7 +34,7 @@ class Bench:
         self.manager = InstanceManager.make()
         self.settings = self.manager.settings
         try:
-            ctx.connect_kwargs.pkey = RSAKey.from_private_key_file(
+            ctx.connect_kwargs.pkey = Ed25519Key.from_private_key_file(
                 self.manager.settings.key_path
             )
             self.connect = ctx.connect_kwargs
@@ -287,7 +287,7 @@ class Bench:
             raise BenchError('Failed to update nodes', e)
 
         if node_parameters.protocol == 0:
-            Print.info('Running HotStuff')
+            Print.info('Running sMVBA')
         elif node_parameters.protocol == 1:
             Print.info('Running AsyncHotStuff')
         elif node_parameters.protocol == 2:
