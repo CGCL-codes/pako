@@ -16,8 +16,8 @@ class AWSError(Exception):
 
 
 class InstanceManager:
-    INSTANCE_NAME = 'async-hotstuff-node'
-    SECURITY_GROUP_NAME = 'async-hotstuff'
+    INSTANCE_NAME = 'sMVBA-node'
+    SECURITY_GROUP_NAME = 'sMVBA'
 
     def __init__(self, settings):
         assert isinstance(settings, Settings)
@@ -68,7 +68,7 @@ class InstanceManager:
 
     def _create_security_group(self, client):
         client.create_security_group(
-            Description='HotStuff node',
+            Description='Pako node',
             GroupName=self.SECURITY_GROUP_NAME,
         )
 
@@ -99,6 +99,19 @@ class InstanceManager:
                     'Ipv6Ranges': [{
                         'CidrIpv6': '::/0',
                         'Description': 'Consensus port',
+                    }],
+                },
+                {
+                    'IpProtocol': 'tcp',
+                    'FromPort': self.settings.aba_port,
+                    'ToPort': self.settings.aba_port,
+                    'IpRanges': [{
+                        'CidrIp': '0.0.0.0/0',
+                        'Description': 'ABA port',
+                    }],
+                    'Ipv6Ranges': [{
+                        'CidrIpv6': '::/0',
+                        'Description': 'ABA port',
                     }],
                 },
                 {
@@ -135,7 +148,7 @@ class InstanceManager:
         response = client.describe_images(
             Filters=[{
                 'Name': 'description',
-                'Values': ['Canonical, Ubuntu, 20.04 LTS, amd64 focal image build on 2020-10-26']
+                'Values': ['Canonical, Ubuntu, 20.04 LTS, amd64 focal image build on 2023-06-30']
             }]
         )
         return response['Images'][0]['ImageId']

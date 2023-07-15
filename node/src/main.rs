@@ -20,7 +20,7 @@ use tokio::task::JoinHandle;
 async fn main() {
     let matches = App::new(crate_name!())
         .version(crate_version!())
-        .about("A research implementation of the sMVBA protocol.")
+        .about("A research implementation of the Pako protocol.")
         .args_from_usage("-v... 'Sets the level of verbosity'")
         .subcommand(
             SubCommand::with_name("keys")

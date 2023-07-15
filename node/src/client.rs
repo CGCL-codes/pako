@@ -16,7 +16,7 @@ use tokio_util::codec::{Framed, LengthDelimitedCodec};
 async fn main() -> Result<()> {
     let matches = App::new(crate_name!())
         .version(crate_version!())
-        .about("Benchmark client for HotStuff nodes.")
+        .about("Benchmark client for Pako nodes.")
         .args_from_usage("<ADDR> 'The network address of the node where to send txs'")
         .args_from_usage("--timeout=<INT> 'The nodes timeout value'")
         .args_from_usage("--size=<INT> 'The size of each transaction in bytes'")

@@ -1,7 +1,7 @@
 from os import error
 from fabric import Connection, ThreadingGroup as Group
 from fabric.exceptions import GroupException
-from paramiko import RSAKey
+from paramiko import Ed25519Key
 from paramiko.ssh_exception import PasswordRequiredException, SSHException
 from os.path import basename, splitext
 from time import sleep
@@ -34,7 +34,7 @@ class Bench:
         self.manager = InstanceManager.make()
         self.settings = self.manager.settings
         try:
-            ctx.connect_kwargs.pkey = RSAKey.from_private_key_file(
+            ctx.connect_kwargs.pkey = Ed25519Key.from_private_key_file(
                 self.manager.settings.key_path
             )
             self.connect = ctx.connect_kwargs
@@ -163,13 +163,14 @@ class Bench:
 
         names = [x.name for x in keys]
         consensus_addr = [f'{x}:{self.settings.consensus_port}' for x in hosts]
+        aba_addr = [f'{x}:{self.settings.aba_port}' for x in hosts]
         front_addr = [f'{x}:{self.settings.front_port}' for x in hosts]
         tss_keys = []
         for i in range(nodes):
             tss_keys += [TSSKey.from_file(PathMaker.threshold_key_file(i))]
         ids = [x.id for x in tss_keys]
         mempool_addr = [f'{x}:{self.settings.mempool_port}' for x in hosts]
-        committee = Committee(names, ids, consensus_addr, front_addr, mempool_addr)
+        committee = Committee(names, ids, consensus_addr, aba_addr, front_addr, mempool_addr)
         committee.print(PathMaker.committee_file())
 
         node_parameters.print(PathMaker.parameters_file())
@@ -287,11 +288,9 @@ class Bench:
             raise BenchError('Failed to update nodes', e)
 
         if node_parameters.protocol == 0:
-            Print.info('Running HotStuff')
+            Print.info('Running sMVBA')
         elif node_parameters.protocol == 1:
-            Print.info('Running AsyncHotStuff')
-        elif node_parameters.protocol == 2:
-            Print.info('Running TwoChainVABA')
+            Print.info('Running Pako')
         else:
             Print.info('Wrong protocol type!')
             return
