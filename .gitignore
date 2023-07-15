@@ -6,3 +6,4 @@ db_*
 benchmark/client
 benchmark/node
 benchmark/results
+benchmark/plots

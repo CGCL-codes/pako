@@ -102,7 +102,7 @@ def remote(ctx):
     ''' Run benchmarks on AWS '''
     bench_params = {
         'nodes': [10],
-        'rate': [35_000, 40_000],
+        'rate': [10_000, 20_000],
         'tx_size': 512,
         'faults': 0, 
         'duration': 60,
@@ -110,7 +110,7 @@ def remote(ctx):
     }
     node_params = {
         'consensus': {
-            'timeout_delay': 10_000,
+            'timeout_delay': 5_000,
             'sync_retry_delay': 100_000,
             'max_payload_size': 1_000,
             'min_block_delay': 100,
@@ -127,7 +127,7 @@ def remote(ctx):
         'protocol': 1, # 0 for 2-chain HotStuff, 1 for Ditto, 2 for 2-chain VABA
     }
     try:
-        Bench(ctx).run(bench_params, node_params, debug=True)
+        Bench(ctx).run(bench_params, node_params, debug=False)
     except BenchError as e:
         Print.error(e)
 
