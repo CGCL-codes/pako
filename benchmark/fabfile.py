@@ -37,14 +37,14 @@ def local(ctx):
         'protocol': 1, # 0 for sMVBA, 1 for Pako
     }
     try:
-        ret = LocalBench(bench_params, node_params).run(debug=True).result()
+        ret = LocalBench(bench_params, node_params).run(debug=False).result()
         print(ret)
     except BenchError as e:
         Print.error(e)
 
 
 @task
-def create(ctx, nodes=4):
+def create(ctx, nodes=2):
     ''' Create a testbed'''
     try:
         InstanceManager.make().create_instances(nodes)
@@ -102,7 +102,7 @@ def remote(ctx):
     ''' Run benchmarks on AWS '''
     bench_params = {
         'nodes': [10],
-        'rate': [10_000, 20_000],
+        'rate': [10_000, 20_000, 30_000, 40_000, 50_000, 60_000, 70_000, 80_000],
         'tx_size': 512,
         'faults': 0, 
         'duration': 60,
