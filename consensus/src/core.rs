@@ -827,7 +827,7 @@ impl Core {
         Ok(())
     }
 
-    async fn output(&mut self, block: Block) -> ConsensusResult<()> {
+    async fn output(&mut self, block: &Block) -> ConsensusResult<()> {
         // Output block with payloads.
         if let Err(e) = self.commit_channel.send(block.clone()).await {
             panic!("Failed to send message through commit channel: {}", e);
@@ -846,12 +846,12 @@ impl Core {
         }
 
         // Clean up mempool.
-        self.cleanup_epoch(block).await?;
+        self.cleanup_epoch(&block).await?;
 
         Ok(())
     }
 
-    async fn cleanup_epoch(&mut self, block: Block) -> ConsensusResult<()> {
+    async fn cleanup_epoch(&mut self, block: &Block) -> ConsensusResult<()> {
         // Mark epoch as halted.
         self.epochs_halted.insert(block.epoch);
         if self.epochs_halted.remove(&(self.halt_mark + 1)) {
@@ -890,17 +890,20 @@ impl Core {
                         ConsensusMessage::Vote(vote) => self.handle_vote(vote).await,
                     }
                 },
-                Some(block) = self.advance_channel.recv() => {                    
-                    let new_block = self.generate_block(block.epoch+1, 1, Proof::Pi(Vec::new())).await
-                        .expect(&format!("Failed to generate block of epoch {}", block.epoch));
-                    self.spb(new_block).await.expect(&format!("Failed to start spb block of epoch {}", block.epoch+1));
+                Some(block) = self.advance_channel.recv() => {             
+                    // Clean up this epoch.
+                    self.output(&block).await.expect(&format!("Failed to output and cleanup block {} of epoch {}", block.digest(), block.epoch));
 
                     // Forward Halt to others.
                     self.transmit(ConsensusMessage::Halt(block.clone()), None).await
                         .expect(&format!("Failed to forward Halt of epoch {}", block.epoch));
 
-                    // Clean up this epoch.
-                    self.output(block).await
+                    // Enter new epoch.
+                    let new_block = self.generate_block(block.epoch+1, 1, Proof::Pi(Vec::new())).await
+                        .expect(&format!("Failed to generate block of epoch {}", block.epoch));
+                    self.spb(new_block).await.expect(&format!("Failed to start spb block of epoch {}", block.epoch+1));
+
+                    Ok(())
                 },
                 else => break,
             };
