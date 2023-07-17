@@ -268,10 +268,7 @@ impl Core {
         // will get it and then make us resume processing this block.
         if !self.mempool_driver.verify(block.clone()).await? {
             debug!("Processing of {} suspended: missing payload", block.digest());
-            self.transmit(
-                ConsensusMessage::SyncRequest(block.epoch, block.view, self.name), 
-                Some(&block.author)
-            ).await?;
+            return Ok(())
         }
 
         let phase = match &block.proof {
@@ -903,7 +900,6 @@ impl Core {
                         ConsensusMessage::RandomCoin(coin) => self.handle_random_coin(coin).await,
                         ConsensusMessage::PreVote(prevote) => self.handle_prevote(&prevote).await,
                         ConsensusMessage::Vote(vote) => self.handle_vote(vote).await,
-                        ConsensusMessage::SyncRequest(epoch, view, sender) => self.handle_sync_request(epoch, view, sender).await,
                     }
                 },
                 Some(block) = self.advance_channel.recv() => {             
