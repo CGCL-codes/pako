@@ -169,7 +169,7 @@ impl Core {
 
             #[cfg(feature = "benchmark")]
             for x in &block.payload {
-                info!("Created B{}({})", block.epoch, base64::encode(x));
+                info!("Created B{}({}) by id{{{}}}", block.epoch, base64::encode(x), self.committee.id(self.name));
             }
         }
 
@@ -842,7 +842,7 @@ impl Core {
 
         #[cfg(feature = "benchmark")]
         for x in &block.payload {
-            info!("Committed B{}({})", &block.epoch, base64::encode(x));
+            info!("Committed B{}({}) proposed by id{{{}}}", &block.epoch, base64::encode(x), self.committee.id(block.author));
         }
 
         // Clean up mempool.
