@@ -67,7 +67,7 @@ class LogParser:
             # for k, v in x:
             #     if not k in merged or merged[k] > v:
             #         merged[k] = v
-            for k1, k2, v in x:
+            for (k1, k2), v in x:
                 if not (k1, k2) in merged or merged[(k1, k2)] > v:
                     merged[(k1, k2)] = v
         return merged
@@ -94,11 +94,11 @@ class LogParser:
             raise ParseError('Client(s) panicked')
 
         tmp = findall(r'\[(.*Z) .* Created B\d+\(([^ ]+)\) by id\{(\d+)\}', log)
-        tmp = [(d, id, self._to_posix(t)) for t, d, id in tmp]
+        tmp = [((d, id), self._to_posix(t)) for t, d, id in tmp]
         proposals = self._merge_results([tmp])
 
         tmp = findall(r'\[(.*Z) .* Committed B\d+\(([^ ]+)\) proposed by id\{(\d+)\}', log)
-        tmp = [(d, id, self._to_posix(t)) for t, d, id in tmp]
+        tmp = [((d, id), self._to_posix(t)) for t, d, id in tmp]
         commits = self._merge_results([tmp])
 
         tmp = findall(r'Payload ([^ ]+) contains (\d+) B', log)
@@ -254,3 +254,4 @@ class LogParser:
                 nodes += [f.read()]
 
         return cls(clients, nodes, faults=faults, protocol=protocol, ddos=ddos)
+    
