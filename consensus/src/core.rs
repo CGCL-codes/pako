@@ -249,6 +249,11 @@ impl Core {
         Ok(())
     }
 
+    async fn handle_sync_request(&mut self, epoch: EpochNumber, view: ViewNumber, sender: PublicKey) -> ConsensusResult<()> {
+        let block = self.get_block(self.name, epoch, view).unwrap().clone();
+        self.transmit(ConsensusMessage::Val(block), Some(&sender)).await
+    }
+
     async fn handle_val(&mut self, block: Block) -> ConsensusResult<()> {
         // Check the block is correctly formed.
         block.verify(&self.committee, self.halt_mark, &self.epochs_halted)?;
@@ -258,6 +263,16 @@ impl Core {
             self.value_validation(&block),
             ConsensusError::InvalidVoteProof(block.proof.clone())
         );
+
+        // Let's see if we have the block's data. If we don't, the mempool
+        // will get it and then make us resume processing this block.
+        if !self.mempool_driver.verify(block.clone()).await? {
+            debug!("Processing of {} suspended: missing payload", block.digest());
+            self.transmit(
+                ConsensusMessage::SyncRequest(block.epoch, block.view, self.name), 
+                Some(&block.author)
+            ).await?;
+        }
 
         let phase = match &block.proof {
             Proof::Pi(_) => {
@@ -888,10 +903,11 @@ impl Core {
                         ConsensusMessage::RandomCoin(coin) => self.handle_random_coin(coin).await,
                         ConsensusMessage::PreVote(prevote) => self.handle_prevote(&prevote).await,
                         ConsensusMessage::Vote(vote) => self.handle_vote(vote).await,
+                        ConsensusMessage::SyncRequest(epoch, view, sender) => self.handle_sync_request(epoch, view, sender).await,
                     }
                 },
                 Some(block) = self.advance_channel.recv() => {             
-                    // Clean up this epoch.
+                    // Output and Clean up.
                     self.output(&block).await.expect(&format!("Failed to output and cleanup block {} of epoch {}", block.digest(), block.epoch));
 
                     // Forward Halt to others.

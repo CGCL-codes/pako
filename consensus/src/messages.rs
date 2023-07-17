@@ -60,6 +60,7 @@ pub enum ConsensusMessage {
     RandomCoin(RandomCoin),
     PreVote(PreVote),
     Vote(Vote),
+    SyncRequest(EpochNumber, ViewNumber, PublicKey),
 }
 
 impl fmt::Display for ConsensusMessage {
@@ -76,6 +77,7 @@ impl fmt::Display for ConsensusMessage {
                 ConsensusMessage::RandomCoin(_) => "RANDOM_COIN",
                 ConsensusMessage::PreVote(_) => "PREVOTE",
                 ConsensusMessage::Vote(_) => "VOTE",
+                ConsensusMessage::SyncRequest(_, _, _) => "SYNC_REQUEST",
             }           
         )
     }
