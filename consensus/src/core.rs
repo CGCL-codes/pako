@@ -568,9 +568,10 @@ impl Core {
             let mut election_state = self.election_states
                 .entry((random_coin.epoch, random_coin.view))
                 .and_modify(|e| {
-                    match e.lock().unwrap().coin {
+                    let mut state = e.lock().unwrap();
+                    match state.coin {
                         Some(_) => is_handled_before = true,
-                        _ => (),
+                        _ => state.coin = Some(random_coin.clone()),
                     }
                 })
                 .or_insert(Arc::new(Mutex::new(ElectionState { coin: Some(random_coin.clone()), wakers: Vec::new() })))
