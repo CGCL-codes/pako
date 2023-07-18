@@ -391,8 +391,9 @@ impl BinaryAgreement {
         loop {
             let result = tokio::select! {
                 Some((epoch, vote)) = self.input_channel.recv() => {
-                    let val = BAVote { author: self.name, vote, epoch, view: 1 };
+                    self.halt_mark = epoch - 1;
 
+                    let val = BAVote { author: self.name, vote, epoch, view: 1 };
                     if let Err(e) = self.handle_val(&val).await {
                         Err(e)
                     } else {
