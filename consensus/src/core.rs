@@ -4,7 +4,7 @@ use crate::aggregator::Aggregator;
 use crate::config::{Committee, Parameters, EpochNumber, ViewNumber};
 use crate::filter::ConsensusFilterInput;
 use crate::mempool::MempoolDriver;
-use crate::synchronizer::{ElectionState, transmit, Synchronizer, BAState};
+use crate::synchronizer::{ElectionState, transmit, Synchronizer, BAState, ElectionFuture};
 use crate::error::{ConsensusError, ConsensusResult};
 use crate::messages::*;
 use crypto::Hash as _;
@@ -28,14 +28,13 @@ pub struct Core {
     network_filter: Sender<ConsensusFilterInput>,
 
     core_channel: Receiver<ConsensusMessage>,
-    aba_sync_sender: Sender<(EpochNumber, Arc<Mutex<BAState>>)>, // invoke aba, wait for done
-    aba_sync_feedback_receiver: Receiver<(EpochNumber, bool)>,
+    aba_sync_sender: Sender<(EpochNumber, Arc<Mutex<BAState>>, Arc<Mutex<ElectionState>>)>, // invoke aba, wait for done
+    aba_sync_feedback_receiver: Receiver<(EpochNumber, bool, Option<RandomCoin>)>,
     halt_channel: Sender<(Arc<Mutex<ElectionState>>, Block)>, // handle halts
     advance_channel: Receiver<Halt>, // propose block for next epoch
     commit_channel: Sender<Block>,
 
     votes_aggregators: HashMap<(EpochNumber, Digest), Aggregator<ConsensusMessage>>, // n-f votes collector
-    first_view_coins: HashMap<EpochNumber, RandomCoin>,  // store first-view coins to help enter fallback
     election_states: HashMap<(EpochNumber, ViewNumber), Arc<Mutex<ElectionState>>>, // stores states of leader election
     ba_states: HashMap<EpochNumber, Arc<Mutex<BAState>>>, // store states of ABA, indicating whether ABA result is arrived
     blocks_received: HashMap<(PublicKey, EpochNumber, ViewNumber), Block>,  // blocks received from others and the node itself, will be updated as consensus proceeds
@@ -99,7 +98,6 @@ impl Core {
             advance_channel: rx_advance,
             votes_aggregators: HashMap::new(),
             election_states: HashMap::new(),
-            first_view_coins: HashMap::new(),
             ba_states: HashMap::new(),
             blocks_received: HashMap::new(),
             halt_mark: 0,
@@ -500,24 +498,8 @@ impl Core {
                     })
                     .collect();
 
-                // If view = 1, Invoke ABA.
-                if randomness_share.view == 1 {
-                    let optimistic_sigma1 = shares.iter().find_map(|s| s.optimistic_sigma1.clone());
-                    debug!("Invoke binary agreement of epoch {}, vote: {}", randomness_share.epoch, optimistic_sigma1.is_some());
-                    let ba_state = Arc::new(Mutex::new(
-                        BAState { 
-                            consistent: None, 
-                            optimistic_sigma1, 
-                            wakers: Vec::new(), 
-                            epoch: randomness_share.epoch 
-                        }
-                    ));
-                    self.ba_states.insert(randomness_share.epoch, ba_state.clone());
-                    self.invoke_ba(randomness_share.epoch, ba_state).await;
-                }
-
                 // Combine shares into a complete signature.
-                let share_map = shares.into_iter()
+                let share_map = shares.iter()
                     .map(|s| (self.committee.id(s.author), &s.signature_share))
                     .collect::<BTreeMap<_, _>>();
                 let threshold_signature = self.pk_set.combine_signatures(share_map).expect("Unqualified shares!");
@@ -536,8 +518,26 @@ impl Core {
                     fallback_leader: leader, 
                     threshold_sig: threshold_signature,
                 };
+
+                // If view = 1, Invoke ABA.
+                if randomness_share.view == 1 {
+                    let optimistic_sigma1 = shares.into_iter().find_map(|s| s.optimistic_sigma1.clone());
+                    debug!("Invoke binary agreement of epoch {}, vote: {}", randomness_share.epoch, optimistic_sigma1.is_some());
+                    let ba_state = Arc::new(Mutex::new(
+                        BAState { 
+                            consistent: None, 
+                            coin: Some(random_coin.clone()),
+                            optimistic_sigma1, 
+                            wakers: Vec::new(), 
+                            epoch: randomness_share.epoch 
+                        }
+                    ));
+                    self.ba_states.insert(randomness_share.epoch, ba_state.clone());
+                    self.invoke_ba(randomness_share.epoch, ba_state).await;
+                }
+
+                // Handle and forward coin.
                 self.handle_random_coin(&random_coin).await?;
-                self.first_view_coins.insert(randomness_share.epoch, random_coin);
 
                 Ok(())
             },
@@ -545,10 +545,17 @@ impl Core {
 
     }
 
-    async fn invoke_ba(&self, epoch: EpochNumber, ba_state: Arc<Mutex<BAState>>) {
+    async fn invoke_ba(&mut self, epoch: EpochNumber, ba_state: Arc<Mutex<BAState>>) {
+        let election_state = self.election_states
+            .entry((epoch, 1))
+            .or_insert(Arc::new(Mutex::new(
+                ElectionState { coin: None, wakers: Vec::new() }
+            )))
+            .clone();
+        
         // Send vote to ABA.
         self.aba_sync_sender
-            .send((epoch, ba_state))
+            .send((epoch, ba_state, election_state))
             .await.expect(&format!("Failed to invoke aba at epoch {}", epoch));
     }
 
@@ -931,7 +938,6 @@ impl Core {
         self.blocks_received.retain(|&(_, e, _), _| e != block.epoch);
         self.votes_aggregators.retain(|&(e, _), _| e != block.epoch);
         self.election_states.retain(|&(e, _), _| e != block.epoch);
-        self.first_view_coins.retain(|&e, _| e != block.epoch);
 
         // Clean up payloads.
         self.mempool_driver.cleanup_async(&block).await;
@@ -962,13 +968,12 @@ impl Core {
                 Some(halt) = self.advance_channel.recv() => {                    
                     self.advance(halt).await
                 },
-                Some((epoch, is_optimistic_path_success)) = self.aba_sync_feedback_receiver.recv() => {
+                Some((epoch, is_optimistic_path_success, coin)) = self.aba_sync_feedback_receiver.recv() => {
                     if is_optimistic_path_success {
                         // Request help for commiting from optimistic path.
                         self.transmit(ConsensusMessage::RequestHelp(epoch, self.name), None).await
                     } else {
-                        let coin = self.first_view_coins.get(&epoch).unwrap().clone();
-                        self.start_fallback(&coin).await
+                        self.start_fallback(&coin.unwrap()).await
                     }
                 },
                 else => break,
