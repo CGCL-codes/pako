@@ -212,6 +212,11 @@ impl Core {
         // Update proof of the block of the node's own.
         self.update_block(block.clone());
 
+        // Disable pb of optimistic leader.
+        if block.view == 1 && self.name == self.get_optimistic_leader(block.epoch){
+            return Ok(())
+        }
+
         // Collect the node's own echo.
         let echo = Echo::new(block.digest(), 
             block.author, 
