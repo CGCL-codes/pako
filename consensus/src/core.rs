@@ -164,8 +164,6 @@ impl Core {
         ).await;
 
         if !block.payload.is_empty() {
-            info!("Created {}", block);
-
             #[cfg(feature = "benchmark")]
             for x in &block.payload {
                 info!("Created B{}({}) by id{{{}}}", block.epoch, base64::encode(x), self.committee.id(self.name));
@@ -863,7 +861,7 @@ impl Core {
         if let Err(e) = self.commit_channel.send(halt.block.clone()).await {
             panic!("Failed to send message through commit channel: {}", e);
         } else {
-            info!("Commit block {} of member {} in epoch {}, view {}", 
+            debug!("Commit block {} of member {} in epoch {}, view {}", 
             halt.block.digest(),
             halt.block.author,
             halt.block.epoch,
@@ -941,7 +939,7 @@ impl Core {
                     match msg {
                         ConsensusMessage::Val(block) => self.handle_val(block).await,
                         ConsensusMessage::Echo(echo) => self.handle_echo(&echo).await,
-                        ConsensusMessage::Amplify(optimistic_sigma1) => self.handle_amplify(&optimistic_sigma1).await,
+                        ConsensusMessage::Amplify(amplify) => self.handle_amplify(&amplify).await,
                         ConsensusMessage::Finish(finish) => self.handle_finish(&finish).await,
                         ConsensusMessage::Halt(halt) => self.handle_halt(halt).await,
                         ConsensusMessage::RandomnessShare(randomness_share) => self.handle_randommess_share(&randomness_share).await,
@@ -958,7 +956,7 @@ impl Core {
                 Some(epoch) = self.timeout_result_channel.recv() => {
                     let optimistic_sigma1 = self.get_block(self.get_optimistic_leader(epoch), epoch, 1).cloned();
                     let amplify = Amplify { author: self.name, epoch, optimistic_sigma1 };
-                    self.handle_amplify(&amplify).await.expect("Failed to handle amplify of the node's own");
+                    let _ = self.handle_amplify(&amplify).await;
                     self.transmit(ConsensusMessage::Amplify(amplify), None).await
                 },
                 Some((epoch, is_optimistic_path_success)) = self.aba_sync_feedback_receiver.recv() => {
@@ -966,7 +964,10 @@ impl Core {
                         // Request help for commiting from optimistic path.
                         self.transmit(ConsensusMessage::RequestHelp(epoch, self.name), None).await
                     } else {
-                        let block = self.get_block(self.name, epoch, 1).unwrap().clone();
+                        let mut block = self.get_block(self.name, epoch, 1).unwrap().clone();
+                        block.proof = Proof::Pi(Vec::new());
+                        block.view += 1;
+                        block.signature = self.signature_service.request_signature(block.digest()).await;
                         self.spb(&block).await
                     }
                 },
