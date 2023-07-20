@@ -44,6 +44,9 @@ pub enum ConsensusError {
     #[error("Invalid vote proof")]
     InvalidVoteProof(Proof),
 
+    #[error("Invalid optimistic Finish from {0}")]
+    InvalidOptimisticBlock(PublicKey),
+
     #[error("Invalid signature")]
     InvalidSignature(#[from] CryptoError),
 

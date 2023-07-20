@@ -54,6 +54,7 @@ pub enum ConsensusMessage {
     Val(Block),
     Echo(Echo),
     Finish(Finish),
+    Amplify(Amplify),
     Halt(Halt),
     RandomnessShare(RandomnessShare),
     RandomCoin(RandomCoin),
@@ -78,6 +79,7 @@ impl fmt::Display for ConsensusMessage {
                 ConsensusMessage::Vote(_) => "VOTE",
                 ConsensusMessage::RequestHelp(_, _) => "REQUEST_HELP",
                 ConsensusMessage::Help(_) => "HELP",
+                ConsensusMessage::Amplify(_) => "AMPLIFY",
             }           
         )
     }
@@ -207,7 +209,6 @@ pub struct Echo {
     // Block info.
     pub block_digest: Digest,
     pub block_author: PublicKey,
-    pub optimistic_block: Option<Block>,
     pub phase: PBPhase,
 
     // Echo info.
@@ -223,7 +224,6 @@ impl Echo {
     pub async fn new(
         block_digest: Digest, 
         block_author: PublicKey,
-        optimistic_block: Option<Block>,
         phase: PBPhase, 
         epoch: EpochNumber,
         view: ViewNumber,
@@ -234,7 +234,6 @@ impl Echo {
         Self {
             block_digest,
             block_author,
-            optimistic_block,
             phase,
             epoch,
             view,
@@ -247,7 +246,6 @@ impl Echo {
         committee: &Committee,
         pk_set: &PublicKeySet, 
         block_author: PublicKey, 
-        optimistic_leader: PublicKey,
         halt_mark: EpochNumber, 
         epochs_halted: &HashSet<EpochNumber>
     ) -> ConsensusResult<()> {
@@ -259,8 +257,7 @@ impl Echo {
 
         // Verify leader.
         ensure!(
-            (self.block_author == block_author || self.block_author == optimistic_leader) &&
-                self.optimistic_block.as_ref().map_or(true, |b| b.author == self.block_author),
+            self.block_author == block_author,
             ConsensusError::WrongLeader {
                 digest: self.block_digest.clone(),
                 leader: self.block_author,
@@ -269,10 +266,6 @@ impl Echo {
                 view: self.view,
             }
         );
-
-        // Verify block.
-        self.optimistic_block.as_ref()
-            .map_or_else(|| Ok(()), |b| b.verify(committee, halt_mark, epochs_halted))?;
 
         // Ensure the authority has voting rights.
         ensure!(
@@ -295,13 +288,12 @@ impl fmt::Debug for Echo {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
         write!(
             f, 
-            "Echo(author {}, block_author {}, epoch {}, view {}, PBPhase {}, is optimistic? {})", 
+            "Echo(author {}, block_author {}, epoch {}, view {}, PBPhase {}", 
             self.author,
             self.block_author,
             self.epoch,
             self.view,
             self.phase,
-            self.optimistic_block.is_some()
         )
     }
 }
@@ -315,10 +307,6 @@ impl Hash for Echo {
             match self.phase {
                 PBPhase::Phase1 => &[0],
                 PBPhase::Phase2 => &[1],
-            },
-            match self.optimistic_block {
-                None => &[0],
-                Some(_) => &[1],
             },
             "ECHO"
         )
@@ -339,13 +327,62 @@ impl Hash for Finish {
     }
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct Amplify {
+    pub author: PublicKey,
+    pub epoch: EpochNumber,
+    pub optimistic_sigma1: Option<Block>,
+}
+
+impl Amplify {
+    pub fn verify(
+        &self, 
+        committee: &Committee, 
+        optimistic_leader: PublicKey,
+        pk_set: &PublicKeySet, 
+        halt_mark: EpochNumber, 
+        epochs_halted: &HashSet<EpochNumber>
+    ) -> ConsensusResult<()> {
+        // Check for epoch.
+        ensure!(
+            self.epoch > halt_mark && !epochs_halted.contains(&self.epoch),
+            ConsensusError::MessageWithHaltedEpoch(self.epoch, halt_mark+1)
+        );
+
+        // Ensure the authority has voting rights.
+        ensure!(
+            committee.stake(&self.author) > 0,
+            ConsensusError::UnknownAuthority(self.author)
+        );
+
+        // Verify optimistic leader and sigma1.
+        if let Some(optimistic_sigma1) = &self.optimistic_sigma1 {
+            ensure!(
+                optimistic_sigma1.author == optimistic_leader,
+               ConsensusError::InvalidOptimisticBlock(optimistic_sigma1.author)
+           );
+            ensure!(
+               optimistic_sigma1.check_sigma1(&pk_set.public_key()),
+               ConsensusError::InvalidSignatureShare(optimistic_sigma1.author)
+            );
+        }
+
+        Ok(())
+    }
+}
+
+impl Hash for Amplify {
+    fn digest(&self) -> Digest {
+        digest!(self.epoch.to_le_bytes(), "AMPLIFY")
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct RandomnessShare {
     pub epoch: EpochNumber, // eopch
     pub view: ViewNumber, // view
     pub author: PublicKey,
     pub signature_share: SignatureShare,
-    pub optimistic_sigma1: Option<Block>,
 }
 
 impl RandomnessShare {
@@ -353,7 +390,6 @@ impl RandomnessShare {
         epoch: EpochNumber,
         view: ViewNumber,
         author: PublicKey,
-        optimistic_sigma1: Option<Block>,
         mut signature_service: SignatureService,
     ) -> Self {
         let digest = digest!(epoch.to_le_bytes(), view.to_le_bytes(), "RANDOMNESS_SHARE");
@@ -363,7 +399,6 @@ impl RandomnessShare {
             view,
             author,
             signature_share,
-            optimistic_sigma1,
         }
     }
 
@@ -393,10 +428,7 @@ impl RandomnessShare {
             ConsensusError::InvalidSignatureShare(self.author)
         );
 
-        // Check optimistic block.
-        self.optimistic_sigma1
-            .as_ref()
-            .map_or_else(|| Ok(()), |b| b.verify(committee, halt_mark, epochs_halted))
+        Ok(())
     }
 }
 
@@ -414,11 +446,10 @@ impl fmt::Debug for RandomnessShare {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
         write!(
             f, 
-            "RandomnessShare(author {}, epoch {}, view {}, has optimistic sigma1? {})", 
+            "RandomnessShare(author {}, epoch {}, view {})", 
             self.author, 
             self.epoch, 
             self.view, 
-            self.optimistic_sigma1.is_some()
         )
     }
 }

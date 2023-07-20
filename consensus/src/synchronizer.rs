@@ -2,8 +2,8 @@ use crate::{messages::{RandomCoin, Halt}, Committee, error::ConsensusResult, Epo
 use crypto::PublicKey;
 use futures::{Future, stream::FuturesUnordered, StreamExt};
 use log::debug;
-use tokio::sync::mpsc::{Sender, Receiver};
-use std::{task::{Waker, Poll, Context}, pin::Pin, sync::{Mutex, Arc}, net::SocketAddr, fmt::Debug, collections::{HashSet, HashMap}};
+use tokio::{sync::mpsc::{Sender, Receiver}, time::timeout};
+use std::{task::{Waker, Poll, Context}, pin::Pin, sync::{Mutex, Arc}, net::SocketAddr, fmt::Debug, collections::{HashSet, HashMap}, time::Duration};
 
 #[cfg(test)]
 #[path = "tests/synchronizer_tests.rs"]
@@ -37,9 +37,8 @@ impl Future for ElectionFuture {
 #[derive(Debug)]
 pub struct BAState {
     pub epoch: EpochNumber,
-    pub consistent: Option<bool>,
+    pub output: Option<bool>,
     pub optimistic_sigma1: Option<Block>,
-    pub coin: Option<RandomCoin>,
     pub wakers: Vec<Waker>,
 }
 
@@ -48,23 +47,46 @@ pub struct BAFuture {
 }
 
 impl Future for BAFuture {
-    type Output = (EpochNumber, Option<Block>, Option<RandomCoin>);
+    type Output = (EpochNumber, Option<Block>);
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let mut ba_state = self.state.lock().unwrap();
 
-        if let Some(vote) = ba_state.consistent {
+        if let Some(vote) = ba_state.output {
             if !vote {
-                if let Some(coin) = ba_state.coin.take() {
-                    return Poll::Ready((ba_state.epoch, None, Some(coin)));
-                }
+                return Poll::Ready((ba_state.epoch, None));
             } else if let Some(b) = ba_state.optimistic_sigma1.take() {
-                return Poll::Ready((ba_state.epoch, Some(b), None));
+                return Poll::Ready((ba_state.epoch, Some(b)));
             }
         }
 
         ba_state.wakers.push(cx.waker().clone());
         Poll::Pending
+    }
+}
+
+#[derive(Debug)]
+pub struct TimeoutState {
+    pub epoch: EpochNumber,
+    pub prepared: bool,
+    pub wakers: Vec<Waker>,
+}
+
+pub struct TimeoutFuture {
+    pub state: Arc<Mutex<TimeoutState>>
+}
+
+impl Future for TimeoutFuture {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let mut input = self.state.lock().unwrap();
+        if input.prepared {
+            Poll::Ready(())
+        } else {
+            input.wakers.push(cx.waker().clone());
+            Poll::Pending
+        }
     }
 }
 
@@ -134,28 +156,26 @@ impl Synchronizer {
     pub async fn run_sync_aba(
         aba_channel: Sender<(EpochNumber, bool)>, // channel to invoke aba consensus
         mut aba_feedback_channel: Receiver<(EpochNumber, bool)>, // read aba consensus result
-        mut aba_sync_receiver: Receiver<(EpochNumber, Arc<Mutex<BAState>>, Arc<Mutex<ElectionState>>)>, // send sync result back to main protocol
-        abs_sync_feedback_sender: Sender<(EpochNumber, bool, Option<RandomCoin>)>, // notify main consensus to enter fallback path
+        mut aba_sync_receiver: Receiver<(EpochNumber, Arc<Mutex<BAState>>)>, // send sync result back to main protocol
+        abs_sync_feedback_sender: Sender<(EpochNumber, bool)>, // notify main consensus to enter fallback path
         tx_advance: Sender<Halt>, // notify main consensus to commit block of optimistic path
     ) {
         let mut waiting = HashMap::new();
-        let mut waiting_fallback_leader = FuturesUnordered::<Pin<Box<dyn Future<Output=RandomCoin> + Send>>>::new();
-        let mut ending = FuturesUnordered::<Pin<Box<dyn Future<Output=(EpochNumber, Option<Block>, Option<RandomCoin>)> + Send>>>::new();
+        let mut ending = FuturesUnordered::<Pin<Box<dyn Future<Output=(EpochNumber, Option<Block>)> + Send>>>::new();
         loop {
             tokio::select! {
-                Some((epoch, ba_state, election_state)) = aba_sync_receiver.recv() => {
+                Some((epoch, ba_state)) = aba_sync_receiver.recv() => {
                     let vote = ba_state.lock().unwrap().optimistic_sigma1.is_some();
                     aba_channel.send((epoch, vote)).await.expect("Failed to send vote to background aba.");
 
                     waiting.insert(epoch, ba_state.clone());
-                    waiting_fallback_leader.push(Box::pin(ElectionFuture{ election_state }));
                     ending.push(Box::pin(BAFuture{ state: ba_state }));
                 },
                 Some((epoch, consistent)) = aba_feedback_channel.recv() => {
                     match waiting.get_mut(&epoch) {
                         Some(ba_state) => {
                             let mut ba_state = ba_state.lock().unwrap();
-                            ba_state.consistent = Some(consistent);
+                            ba_state.output = Some(consistent);
                             while let Some(waker) = ba_state.wakers.pop() {
                                 waker.wake();
                             }
@@ -167,9 +187,8 @@ impl Synchronizer {
                             if !consistent {
                                 let ba_state = Arc::new(Mutex::new(BAState{ 
                                     epoch, 
-                                    consistent: Some(false), 
-                                    optimistic_sigma1: None, 
-                                    coin: None, 
+                                    output: Some(false), 
+                                    optimistic_sigma1: None,
                                     wakers: Vec::new() 
                                 }));
                                 waiting.insert(epoch, ba_state.clone());
@@ -178,9 +197,9 @@ impl Synchronizer {
                         }
                     }
                 },
-                Some((epoch, optimistic_sigma1, coin)) = ending.next() => {
+                Some((epoch, optimistic_sigma1)) = ending.next() => {
                     abs_sync_feedback_sender
-                        .send((epoch, optimistic_sigma1.is_some(), coin)).await
+                        .send((epoch, optimistic_sigma1.is_some())).await
                         .expect("Failed to send epoch through fallback channel.");
 
                     if let Some(block) = optimistic_sigma1 {
@@ -189,15 +208,33 @@ impl Synchronizer {
                             .expect("Failed to send optimistic block through advance channel.");
                     }
                 },
-                Some(coin) = waiting_fallback_leader.next() => {
-                    let mut ba_state = waiting.get_mut(&coin.epoch).unwrap().lock().unwrap();
-                    ba_state.coin = Some(coin);
-                    while let Some(waker) = ba_state.wakers.pop() {
-                        waker.wake();
-                    }
-                },
                 else => break,
             }
         }
+    }
+
+    pub async fn run_sync_timeout(
+        timeout_delay: u64, 
+        mut receiver: Receiver<Arc<Mutex<TimeoutState>>>,
+        sender: Sender<EpochNumber>
+    ) {
+        let mut waiting = FuturesUnordered::new();
+        loop {
+            tokio::select! {
+                Some(state) = receiver.recv() => {
+                    let tmp = state.lock().unwrap();
+                    let epoch = tmp.epoch;
+                    drop(tmp);
+                    waiting.push(Self::waiter(epoch, Box::pin(TimeoutFuture{ state }), timeout_delay));
+                },
+                Some(epoch) = waiting.next() => sender.send(epoch).await.expect("Failed to send ABA launch info to main loop"),
+                else => break,
+            }
+        }
+    }
+
+    async fn waiter(epoch: EpochNumber, timeout_fut: Pin<Box<dyn Future<Output=()> + Send>>, delay: u64) -> EpochNumber {
+        let _ = timeout(Duration::from_millis(delay), timeout_fut).await;
+        epoch
     }
 }
