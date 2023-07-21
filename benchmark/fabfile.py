@@ -44,7 +44,7 @@ def local(ctx):
 
 
 @task
-def create(ctx, nodes=10):
+def create(ctx, nodes=4):
     ''' Create a testbed'''
     try:
         InstanceManager.make().create_instances(nodes)
@@ -102,7 +102,7 @@ def remote(ctx):
     ''' Run benchmarks on AWS '''
     bench_params = {
         'nodes': [10, 20],
-        'rate': [10_000, 20_000, 30_000, 40_000, 50_000, 60_000, 70_000, 80_000, 90_000],
+        'rate': [5_000, 10_000, 20_000, 40_000, 60_000, 80_000, 100_000],
         'tx_size': 512,
         'faults': 0, 
         'duration': 60,
@@ -110,7 +110,7 @@ def remote(ctx):
     }
     node_params = {
         'consensus': {
-            'timeout_delay': 5_000,
+            'timeout_delay': 2_000,
             'sync_retry_delay': 100_000,
             'max_payload_size': 1_000,
             'min_block_delay': 100,
@@ -139,7 +139,7 @@ def plot(ctx):
         'nodes': [10, 20, 50],
         'tx_size': 512,
         'faults': [0],
-        'max_latency': [3_000, 6_000]
+        'max_latency': [8_000]
     }
     try:
         Ploter.plot(plot_params)

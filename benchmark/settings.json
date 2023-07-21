@@ -12,7 +12,7 @@
     "repo": {
         "name": "fsMVBA",
         "url": "https://github.com/guozhengxuan/fsMVBA.git",
-        "branch": "pako"
+        "branch": "pako2-fallback"
     },
     "instances": {
         "type": "m5d.xlarge",

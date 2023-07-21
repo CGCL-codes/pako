@@ -892,10 +892,6 @@ impl Core {
     async fn start_new_epoch(&mut self, epoch: EpochNumber) -> ConsensusResult<()> {
         debug!("Start new epoch {} with optimistic leader {}", epoch, self.get_optimistic_leader(epoch));
 
-        // Generate new block.
-        let new_block = self.generate_block(epoch, 1, Proof::Pi(Vec::new())).await
-            .expect(&format!("Failed to generate block of epoch {}", epoch));
-
         // Init timeout task to input 0 to ABA at bad cases.
         let ba_input = Arc::new(Mutex::new(
             TimeoutState { epoch, prepared: false, wakers: Vec::new() }
@@ -904,7 +900,6 @@ impl Core {
         self.timeout_channel.send(ba_input).await.expect("Failed to send ABA prepare message through channel");
 
         // Disable spb in the first view for all nodes.
-        self.update_block(new_block.clone());
         Ok(())
     }
 
@@ -960,11 +955,10 @@ impl Core {
                         // Request help for commiting from optimistic path.
                         self.transmit(ConsensusMessage::RequestHelp(epoch, self.name), None).await
                     } else {
-                        let mut block = self.get_block(self.name, epoch, 1).unwrap().clone();
-                        block.proof = Proof::Pi(Vec::new());
-                        block.view += 1;
-                        block.signature = self.signature_service.request_signature(block.digest()).await;
-                        self.spb(&block).await
+                        // Generate new block, enter the second view.
+                        let new_block = self.generate_block(epoch, 2, Proof::Pi(Vec::new())).await
+                            .expect(&format!("Failed to generate block of epoch {}", epoch));
+                        self.spb(&new_block).await
                     }
                 },
                 else => break,
