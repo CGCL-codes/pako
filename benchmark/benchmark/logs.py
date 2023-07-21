@@ -182,7 +182,8 @@ class LogParser:
                 if batch_id in [i for i, _ in self.commits.keys()]:
                     assert tx_id in sent  # We receive txs that we sent.
                     start = sent[tx_id]
-                    end = min([t for (d, _), t in self.commits.items() if d == batch_id])
+                    total = [t for (d, _), t in self.commits.items() if d == batch_id]
+                    end = sum(total) / len(total)
                     latency += [end-start]   
         return mean(latency) if latency else 0
 
