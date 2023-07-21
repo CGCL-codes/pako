@@ -903,13 +903,9 @@ impl Core {
         self.ba_inputs.insert(epoch, ba_input.clone());
         self.timeout_channel.send(ba_input).await.expect("Failed to send ABA prepare message through channel");
 
-        // Disable spb in first view except optimistic leader.
-        if self.name != self.get_optimistic_leader(epoch) {
-            self.update_block(new_block.clone());
-            return Ok(());
-        }
-        
-        self.spb(&new_block).await
+        // Disable spb in the first view for all nodes.
+        self.update_block(new_block.clone());
+        Ok(())
     }
 
     async fn cleanup_epoch(&mut self, block: &Block) -> ConsensusResult<()> {
