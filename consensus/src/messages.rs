@@ -4,7 +4,7 @@ use crypto::{Digest, Signature, SignatureService, Hash, PublicKey};
 use ed25519_dalek::Digest as _;
 use ed25519_dalek::Sha512;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::convert::TryInto;
 use std::fmt;
 use threshold_crypto::{SignatureShare, PublicKeySet};
@@ -22,32 +22,7 @@ macro_rules! digest {
     };
 }
 
-// Two types of proof associated with block
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub enum Proof {
-    // Relates to input for PBPhase1 (see PBPhase defined below).
-    Pi(Vec<(bool, ViewNumber, threshold_crypto::Signature)>),
-
-    // Relates to input for PBPhase2.
-    // sigma1(left) for PB1 output and sigma2(right) for PB2 output.
-    Sigma(Option<threshold_crypto::Signature>, Option<threshold_crypto::Signature>),
-}
-
-// Two PB phase under SPB.
-#[derive(Serialize, Deserialize, Clone, Copy)]
-pub enum PBPhase {
-    Phase1,
-    Phase2,
-}
-
-impl fmt::Display for PBPhase {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Phase1 => write!(f, "PBPhase1"),
-            Self::Phase2 => write!(f, "PBPhase2"),
-        }
-    }
-}
+type Sigma = Option<threshold_crypto::Signature>;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum ConsensusMessage {
@@ -91,9 +66,7 @@ pub struct Block {
     pub signature: Signature,
     pub epoch: EpochNumber,
     pub view: ViewNumber,
-
-    // According to proof, we can tell which PBPhase this block is currently in.
-    pub proof: Proof,
+    pub proof: Sigma,
 }
 
 impl Block {
@@ -102,7 +75,7 @@ impl Block {
         author: PublicKey,
         epoch: EpochNumber,
         view: ViewNumber,
-        proof: Proof,
+        proof: Sigma,
         mut signature_service: SignatureService,
     ) -> Self {
         let block = Self {
@@ -137,27 +110,14 @@ impl Block {
         );
 
         // Check signature.
-        // Use the digest of block used to be sent during PBPhase1.
-        let mut mocked = self.clone(); 
-        mocked.proof = Proof::Pi(Vec::new());
-        self.signature.verify(&mocked.digest(), &self.author)?;
+        self.signature.verify(&self.digest(), &self.author)?;
 
         Ok(())
     }
 
-    pub fn check_sigma1(&self, pk: &threshold_crypto::PublicKey) -> bool {
-        if let Proof::Sigma(Some(sigma1), _) = &self.proof {
-            // To verify sigma1 we should use digest of block of PBPhase1's state.
-            let mut mocked = self.clone();
-            mocked.proof = Proof::Pi(Vec::new());
-            return pk.verify(&sigma1, mocked.digest())
-        }
-        false
-    }
-
     pub fn check_sigma2(&self, pk: &threshold_crypto::PublicKey) -> bool {
-        if let Proof::Sigma(_, Some(sigma2)) = &self.proof {
-            return pk.verify(&sigma2, self.digest())
+        if let Some(sigma) = &self.proof {
+            return pk.verify(&sigma, self.digest())
         }
         false
     }
@@ -171,8 +131,8 @@ impl Hash for Block {
         hasher.update(self.view.to_le_bytes());
         self.payload.iter().for_each(|p| hasher.update(p));
         hasher.update(match &self.proof {
-            Proof::Pi(_) => &[0],
-            Proof::Sigma(_, _) => &[1],
+            Some(_) => &[1],
+            _ => &[0],
         });
         Digest(hasher.finalize().as_slice()[..32].try_into().unwrap())
     }
@@ -182,14 +142,14 @@ impl fmt::Debug for Block {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
         write!(
             f,
-            "{}: Block(author {}, epoch {}, view {}, PBPhase {}, payload_len {})",
+            "{}: Block(author {}, epoch {}, view {}, has_qc {}, payload_len {})",
             self.digest(),
             self.author,
             self.epoch,
             self.view,
             match self.proof {
-                Proof::Pi(_) => "1",
-                Proof::Sigma(_, _) => "2",
+                Some(_) => "Yes",
+                _ => "No",
             },
             self.payload.iter().map(|x| x.size()).sum::<usize>(),
         )
@@ -203,12 +163,58 @@ impl fmt::Display for Block {
 }
 
 #[derive(Serialize, Deserialize, Clone)]
-pub struct Echo {
+pub struct CommitVector {
+    pub epoch: EpochNumber,
+    pub author: PublicKey,
+    pub vector: HashMap<PublicKey, bool>,
+    pub proof: Sigma,
+}
+
+impl Hash for CommitVector {
+    fn digest(&self) -> Digest {
+        let mut hasher = Sha512::new();
+        hasher.update(self.epoch.to_le_bytes());
+        hasher.update(self.author.0);
+        hasher.update(match &self.proof {
+            Some(_) => &[1],
+            _ => &[0],
+        });
+        let mut tuples = self.vector.iter().collect::<Vec<_>>();
+        tuples.sort_by_key(|e| e.0);
+        tuples.into_iter().for_each(|(k, v)| {
+            hasher.update(k.0);
+            hasher.update(if *v { &[1] } else { &[0] });
+        });
+        Digest(hasher.finalize().as_slice()[..32].try_into().unwrap())
+    }
+}
+
+impl fmt::Debug for CommitVector {
+    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
+        write!(
+            f,
+            "CommitVector(author {}, epoch {}, has_qc {})",
+            self.author,
+            self.epoch,
+            match self.proof {
+                Some(_) => "Yes",
+                _ => "No",
+            },
+        )
+    }
+}
+
+impl fmt::Display for CommitVector {
+    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
+        write!(f, "CV{}", self.author)
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct Echo<T: Hash> {
     // Block info.
     pub block_digest: Digest,
     pub block_author: PublicKey,
-    pub optimistic_block: Option<Block>,
-    pub phase: PBPhase,
 
     // Echo info.
     pub epoch: EpochNumber,
@@ -223,8 +229,6 @@ impl Echo {
     pub async fn new(
         block_digest: Digest, 
         block_author: PublicKey,
-        optimistic_block: Option<Block>,
-        phase: PBPhase, 
         epoch: EpochNumber,
         view: ViewNumber,
         author: PublicKey,
@@ -234,8 +238,6 @@ impl Echo {
         Self {
             block_digest,
             block_author,
-            optimistic_block,
-            phase,
             epoch,
             view,
             author,

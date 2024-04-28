@@ -183,12 +183,6 @@ impl Core {
         transmit(message, &self.name, to, &self.network_filter, &self.committee).await
     }
 
-    fn get_optimistic_leader(&self, epoch: EpochNumber) -> PublicKey {
-        self.committee
-            .get_public_key(epoch as usize % self.committee.size())
-            .unwrap()
-    } 
-
     // Starts the SPB phase.
     async fn spb(&mut self, block: Block) -> ConsensusResult<()> {
         debug!("Processing block {:?}", block);
