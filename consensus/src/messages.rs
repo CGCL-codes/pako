@@ -43,15 +43,12 @@ pub type Sigma = Option<threshold_crypto::Signature>;
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum ConsensusMessage {
     Val(Val),
-    CommitVector(CommitVector),
     Echo(Echo),
     Finish(Finish),
     Halt(Halt),
     RandomnessShare(RandomnessShare),
     RandomCoin(RandomCoin),
     Done(Done),
-    PreVote(PreVote),
-    Vote(Vote),
     RequestHelp(EpochNumber, PublicKey),
     Help(Block),
 }
@@ -63,14 +60,12 @@ impl fmt::Display for ConsensusMessage {
             "ConsensusMessage {{ {} }}",
             match &self {
                 ConsensusMessage::Val(_) => "VAL",
-                ConsensusMessage::CommitVector(_) => "COMMIT_VECTOR",
                 ConsensusMessage::Echo(_) => "ECHO",
                 ConsensusMessage::Finish(_) => "FINISH",
                 ConsensusMessage::Halt(_) => "HALT",
                 ConsensusMessage::RandomnessShare(_) => "RANDOMNESS_SHARE",
                 ConsensusMessage::RandomCoin(_) => "RANDOM_COIN",
-                ConsensusMessage::PreVote(_) => "PREVOTE",
-                ConsensusMessage::Vote(_) => "VOTE",
+                ConsensusMessage::Done(_) => "PREVOTE",
                 ConsensusMessage::RequestHelp(_, _) => "REQUEST_HELP",
                 ConsensusMessage::Help(_) => "HELP",
             }
@@ -574,33 +569,18 @@ impl Hash for RandomCoin {
 }
 
 #[derive(Serialize, Deserialize, Clone)]
-pub struct PreVote {
-    // PreVote author.
+pub struct Done {
     pub author: PublicKey,
-
-    // <epoch, view, leader>
+    pub leader: PublicKey,
     pub epoch: EpochNumber,
     pub view: ViewNumber,
-    pub leader: PublicKey,
-
-    // `Yes` or `No` prevote.
-    pub body: PreVoteEnum,
+    pub proof: Sigma,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
-pub enum PreVoteEnum {
-    // Leader's block
-    Yes(Block),
-
-    // SignatureShare against message digest <epoch, view, leader>.
-    No(SignatureShare),
-}
-
-impl PreVote {
+impl Done {
     pub fn verify(
         &self,
         committee: &Committee,
-        pk_set: &PublicKeySet,
         halt_mark: EpochNumber,
         epochs_halted: &HashSet<EpochNumber>,
     ) -> ConsensusResult<()> {
@@ -610,170 +590,40 @@ impl PreVote {
             ConsensusError::MessageWithHaltedEpoch(self.epoch, halt_mark + 1)
         );
 
-        match &self.body {
-            PreVoteEnum::Yes(block) => {
-                ensure!(
-                    block.check_sigma(&pk_set.public_key()),
-                    ConsensusError::InvalidVoteProof(block.proof.clone())
-                );
-                Ok(())
-            }
-            PreVoteEnum::No(share) => {
-                let pk_share = pk_set.public_key_share(committee.id(self.author));
-                let digest = digest!(
-                    self.epoch.to_le_bytes(),
-                    self.view.to_le_bytes(),
-                    self.leader.0,
-                    "NULL"
-                );
-                ensure!(
-                    pk_share.verify(&share, digest),
-                    ConsensusError::InvalidSignatureShare(self.author)
-                );
-                Ok(())
-            }
-        }
-    }
-}
-
-impl Hash for PreVote {
-    fn digest(&self) -> Digest {
-        digest!(
-            self.epoch.to_le_bytes(),
-            self.view.to_le_bytes(),
-            self.leader.0,
-            "PREVOTE"
-        )
-    }
-}
-
-impl fmt::Debug for PreVote {
-    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
-        write!(
-            f,
-            "PreVote(author {}, epoch {}, view {}, leader {}, body {})",
-            self.author,
-            self.epoch,
-            self.view,
-            self.leader,
-            match self.body {
-                PreVoteEnum::Yes(_) => "YES",
-                PreVoteEnum::No(_) => "NO",
-            }
-        )
-    }
-}
-
-#[derive(Serialize, Deserialize, Clone)]
-pub struct Vote {
-    // Vote author.
-    pub author: PublicKey,
-
-    // <epoch, view, leader>
-    pub epoch: EpochNumber,
-    pub view: ViewNumber,
-    pub leader: PublicKey,
-
-    // `Yes` or `No` vote.
-    pub body: VoteEnum,
-}
-
-#[derive(Serialize, Deserialize, Clone)]
-pub enum VoteEnum {
-    // Leader's block, and a share signed against this Vote.
-    Yes(Block, SignatureShare),
-
-    // If received a yes prevote, threshold signature is set to sigma1 carried by block,
-    // else is combined through n-f shares from PreVote.
-    No(threshold_crypto::Signature, SignatureShare),
-}
-
-impl Vote {
-    pub fn verify(
-        &self,
-        committee: &Committee,
-        pk_set: &PublicKeySet,
-        halt_mark: EpochNumber,
-        epochs_halted: &HashSet<EpochNumber>,
-    ) -> ConsensusResult<()> {
-        // Check for epoch.
+        // Ensure the authority has voting rights.
         ensure!(
-            self.epoch > halt_mark && !epochs_halted.contains(&self.epoch),
-            ConsensusError::MessageWithHaltedEpoch(self.epoch, halt_mark + 1)
+            committee.stake(&self.author) > 0,
+            ConsensusError::UnknownAuthority(self.author)
         );
 
-        match &self.body {
-            VoteEnum::Yes(block, share) => {
-                // Verify sigma1.
-                ensure!(
-                    block.check_sigma(&pk_set.public_key()),
-                    ConsensusError::InvalidVoteProof(block.proof.clone())
-                );
+        Ok(())
+    }
 
-                // Verify sig share.
-                let pk_share = pk_set.public_key_share(committee.id(self.author));
-                ensure!(
-                    pk_share.verify(&share, block.digest()),
-                    ConsensusError::InvalidSignatureShare(self.author)
-                );
-
-                Ok(())
-            }
-            VoteEnum::No(sig, share) => {
-                // Verify threshold signature formed out of n-f `No` PreVotes.
-                let digest = digest!(
-                    self.epoch.to_le_bytes(),
-                    self.view.to_le_bytes(),
-                    self.leader.0,
-                    "NULL"
-                );
-                ensure!(
-                    pk_set.public_key().verify(&sig, digest),
-                    ConsensusError::InvalidThresholdSignature(self.author)
-                );
-
-                // Verify sig share.
-                let digest = digest!(
-                    self.epoch.to_le_bytes(),
-                    self.view.to_le_bytes(),
-                    self.leader.0,
-                    "UNLOCK"
-                );
-                let pk_share = pk_set.public_key_share(committee.id(self.author));
-                ensure!(
-                    pk_share.verify(&share, digest),
-                    ConsensusError::InvalidSignatureShare(self.author)
-                );
-
-                Ok(())
-            }
+    pub fn check_sigma(&self, pk: &threshold_crypto::PublicKey) -> bool {
+        if let Some(sigma) = &self.proof {
+            return pk.verify(&sigma, self.digest());
         }
+        false
     }
 }
 
-impl Hash for Vote {
+impl Hash for Done {
     fn digest(&self) -> Digest {
-        digest!(
-            self.epoch.to_le_bytes(),
-            self.view.to_le_bytes(),
-            self.leader.0,
-            "VOTE"
-        )
+        digest!(self.epoch.to_le_bytes(), self.view.to_le_bytes(), "DONE")
     }
 }
 
-impl fmt::Debug for Vote {
+impl fmt::Debug for Done {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
         write!(
             f,
-            "Vote(author {}, epoch {}, view {}, leader {}, body {})",
+            "PreVote(author {}, epoch {}, view {}, vote {})",
             self.author,
             self.epoch,
             self.view,
-            self.leader,
-            match self.body {
-                VoteEnum::Yes(_, _) => "YES",
-                VoteEnum::No(_, _) => "NO",
+            match &self.proof {
+                Some(_) => "Yes",
+                None => "No",
             }
         )
     }

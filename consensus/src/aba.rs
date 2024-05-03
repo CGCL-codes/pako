@@ -265,7 +265,6 @@ impl BinaryAgreement {
                     conf.epoch,
                     conf.view,
                     self.name,
-                    None,
                     self.signature_service.clone(),
                 )
                 .await;

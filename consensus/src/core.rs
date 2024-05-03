@@ -11,6 +11,7 @@ use ed25519_dalek::Digest as _;
 use ed25519_dalek::Sha512;
 use futures::lock::MutexGuard;
 use log::{debug, error, info, warn};
+use std::borrow::Borrow;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use store::Store;
@@ -472,7 +473,7 @@ impl Core {
                     let received = quorum
                         .into_iter()
                         .filter_map(|m| {
-                            if let ConsensusMessage::CommitVector(cv) = m {
+                            if let ConsensusMessage::Val(Val::CommitVector(cv)) = m {
                                 Some(cv.author)
                             } else {
                                 None
@@ -565,23 +566,6 @@ impl Core {
                     threshold_sig: threshold_signature,
                 };
 
-                // // If view = 1, Invoke ABA.
-                // if randomness_share.view == 1 {
-                //     let optimistic_sigma1 = shares.into_iter().find_map(|s| s.optimistic_sigma1.clone());
-                //     debug!("Invoke binary agreement of epoch {}, vote: {}", randomness_share.epoch, optimistic_sigma1.is_some());
-                //     let ba_state = Arc::new(Mutex::new(
-                //         BAState {
-                //             consistent: None,
-                //             coin: Some(random_coin.clone()),
-                //             optimistic_sigma1,
-                //             wakers: Vec::new(),
-                //             epoch: randomness_share.epoch
-                //         }
-                //     ));
-                //     self.ba_states.insert(randomness_share.epoch, ba_state.clone());
-                //     self.invoke_ba(randomness_share.epoch, ba_state).await;
-                // }
-
                 // Handle and forward coin.
                 self.handle_random_coin(&random_coin).await?;
 
@@ -648,179 +632,87 @@ impl Core {
         let message = ConsensusMessage::RandomCoin(random_coin.clone());
         self.transmit(message, None).await?;
 
-        if random_coin.view > 1 {
-            self.start_fallback(random_coin).await?;
-        }
-
-        Ok(())
+        // Multicast done that indicates whether the node has received the leader's block of current epoch.
+        self.done(random_coin).await
     }
 
-    async fn start_fallback(&mut self, random_coin: &RandomCoin) -> ConsensusResult<()> {
-        // Had the current leader's Finish received, halt and output.
-        let finish_digest = digest!(
-            random_coin.epoch.to_le_bytes(),
-            random_coin.view.to_le_bytes(),
-            "FINISH"
-        );
+    async fn done(&mut self, random_coin: &RandomCoin) -> ConsensusResult<()> {
+        // Enter Done phase.
+        let proof = self
+            .get_block(random_coin.leader, random_coin.epoch)
+            .map(|block| block.proof.clone())
+            .flatten();
 
-        let leader_finish = self
-            .votes_aggregators
-            .get(&(random_coin.epoch, finish_digest))
-            .and_then(|ag| {
-                ag.votes
-                    .iter()
-                    .filter_map(|m| match m {
-                        ConsensusMessage::Finish(finish) => Some(finish),
-                        _ => None,
-                    })
-                    .find(|f| f.0.author == random_coin.leader)
-            });
-
-        if let Some(leader_finish) = leader_finish {
-            self.handle_halt(Halt {
-                block: leader_finish.0.clone(),
-                is_optimistic: false,
-            })
-            .await?;
-        }
-
-        // Enter two-vote phase.
-        let body: Option<_> =
-            match self.get_block(random_coin.leader, random_coin.epoch, random_coin.view) {
-                Some(block) => match &block.proof {
-                    Proof::Sigma(_, _) => Some(PreVoteEnum::Yes(block.clone())),
-                    Proof::Pi(_) => None,
-                },
-                _ => None,
-            };
-
-        // Construct digest for `No` prevote.
-        let digest = digest!(
-            random_coin.epoch.to_le_bytes(),
-            random_coin.view.to_le_bytes(),
-            random_coin.leader.0,
-            "NULL"
-        );
-        let body = match body {
-            Some(body) => body,
-            None => {
-                let signature_share = self
-                    .signature_service
-                    .request_tss_signature(digest)
-                    .await
-                    .unwrap();
-                PreVoteEnum::No(signature_share)
-            }
-        };
-
-        let prevote = PreVote {
+        let done = Done {
             author: self.name,
             epoch: random_coin.epoch,
             view: random_coin.view,
-            leader: random_coin.leader,
-            body,
+            proof,
         };
-        self.handle_prevote(&prevote).await?;
-        self.transmit(ConsensusMessage::PreVote(prevote), None)
-            .await
+        self.handle_done(&done).await?;
+        self.transmit(ConsensusMessage::Done(done), None).await
     }
 
-    async fn handle_prevote(&mut self, prevote: &PreVote) -> ConsensusResult<()> {
-        prevote.verify(
+    async fn handle_done(&mut self, done: &Done) -> ConsensusResult<()> {
+        done.verify(
             &self.committee,
-            &self.pk_set,
             self.halt_mark,
             &self.epochs_halted,
         )?;
 
         self.votes_aggregators
-            .entry((prevote.epoch, prevote.digest()))
+            .entry((done.epoch, done.digest()))
             .or_insert_with(|| Aggregator::<ConsensusMessage>::new())
             .append(
-                prevote.author,
-                ConsensusMessage::PreVote(prevote.clone()),
-                self.committee.stake(&prevote.author),
+                done.author,
+                ConsensusMessage::Done(done.clone()),
+                self.committee.stake(&done.author),
             )?;
 
-        let prevotes = self
+        let dones = self
             .votes_aggregators
-            .get_mut(&(prevote.epoch, prevote.digest()))
+            .get_mut(&(done.epoch, done.digest()))
             .unwrap()
             .take(self.committee.quorum_threshold());
 
-        match prevotes {
+        match dones {
             None => Ok(()),
 
-            Some(prevotes) => {
-                let locked_block = prevotes
+            Some(dones) => {
+                let vote = dones
                     .iter()
-                    .filter_map(|prevote| match prevote {
-                        ConsensusMessage::PreVote(prevote) => Some(prevote),
+                    .filter_map(|done| match done {
+                        ConsensusMessage::Done(done) => Some(done),
                         _ => None,
                     })
-                    .find_map(|prevote| match &prevote.body {
-                        PreVoteEnum::Yes(block) => Some(block),
-                        _ => None,
+                    .any(|done| match &done.proof {
+                        Some(sigma) => true,
+                        _ => false,
                     });
 
-                // Broadcast Vote.
-                let body = match locked_block {
-                    // Broadcast `Yes` Vote if leader's block with sigma1 was received.
-                    Some(block) => {
-                        // Generate the share for sigma2.
-                        let signature_share = self
-                            .signature_service
-                            .request_tss_signature(block.digest())
-                            .await
-                            .unwrap();
-                        VoteEnum::Yes(block.clone(), signature_share)
+                // Invoke ABA.
+                let coin = self.election_states
+                    .get(&(done.epoch, done.view))
+                    .unwrap()
+                    .lock()
+                    .unwrap()
+                    .coin
+                    .clone()
+                    .unwrap();
+                
+                let leader_block = self.get_block(coin.leader, done.epoch).cloned();
+                debug!("Invoke binary agreement of epoch {}, vote: {}", done.epoch, optimistic_sigma1.is_some());
+                let ba_state = Arc::new(Mutex::new(
+                    BAState {
+                        consistent: None,
+                        coin: Some(random_coin.clone()),
+                        leader_block,
+                        wakers: Vec::new(),
+                        epoch: randomness_share.epoch
                     }
-
-                    // Else broadcast `No` Vote.
-                    None => {
-                        let shares: BTreeMap<_, _> = prevotes
-                            .into_iter()
-                            .filter_map(|prevote| match prevote {
-                                ConsensusMessage::PreVote(prevote) => Some(prevote),
-                                _ => None,
-                            })
-                            .filter_map(|prevote| match &prevote.body {
-                                PreVoteEnum::No(share) => {
-                                    Some((self.committee.id(prevote.author), share))
-                                }
-                                _ => None,
-                            })
-                            .collect();
-                        let threshold_signature = self
-                            .pk_set
-                            .combine_signatures(shares)
-                            .expect("not enough qualified shares");
-
-                        let digest = digest!(
-                            prevote.epoch.to_le_bytes(),
-                            prevote.view.to_le_bytes(),
-                            prevote.leader.0,
-                            "UNLOCK"
-                        );
-                        let share = self
-                            .signature_service
-                            .request_tss_signature(digest)
-                            .await
-                            .unwrap();
-
-                        VoteEnum::No(threshold_signature, share)
-                    }
-                };
-
-                let vote = Vote {
-                    author: self.name,
-                    epoch: prevote.epoch,
-                    view: prevote.view,
-                    leader: prevote.leader,
-                    body,
-                };
-                self.handle_vote(&vote).await?;
-                self.transmit(ConsensusMessage::Vote(vote), None).await
+                ));
+                self.ba_states.insert(randomness_share.epoch, ba_state.clone());
+                self.invoke_ba(randomness_share.epoch, ba_state).await
             }
         }
     }
@@ -989,8 +881,8 @@ impl Core {
             .unwrap()
             .lock()
             .unwrap();
-        if ba_state.optimistic_sigma1.is_none() {
-            ba_state.optimistic_sigma1 = Some(optimistic_sigma1);
+        if ba_state.leader_block.is_none() {
+            ba_state.leader_block = Some(optimistic_sigma1);
             while let Some(waker) = ba_state.wakers.pop() {
                 waker.wake();
             }
@@ -1109,14 +1001,13 @@ impl Core {
             let result = tokio::select! {
                 Some(msg) = self.core_channel.recv() => {
                     match msg {
-                        ConsensusMessage::Val(block) => self.handle_val(block).await,
+                        ConsensusMessage::Val(val) => self.handle_val(val).await,
                         ConsensusMessage::Echo(echo) => self.handle_echo(&echo).await,
                         ConsensusMessage::Finish(finish) => self.handle_finish(&finish).await,
                         ConsensusMessage::Halt(halt) => self.handle_halt(halt).await,
                         ConsensusMessage::RandomnessShare(randomness_share) => self.handle_randommess_share(&randomness_share).await,
                         ConsensusMessage::RandomCoin(random_coin) => self.handle_random_coin(&random_coin).await,
-                        ConsensusMessage::PreVote(prevote) => self.handle_prevote(&prevote).await,
-                        ConsensusMessage::Vote(vote) => self.handle_vote(&vote).await,
+                        ConsensusMessage::Done(prevote) => self.handle_done(&prevote).await,
                         ConsensusMessage::RequestHelp(epoch, requester) => self.handle_request_help(epoch, requester).await,
                         ConsensusMessage::Help(optimistic_sigma1) => self.handle_help(optimistic_sigma1).await,
                     }
@@ -1129,7 +1020,7 @@ impl Core {
                         // Request help for commiting from optimistic path.
                         self.transmit(ConsensusMessage::RequestHelp(epoch, self.name), None).await
                     } else {
-                        self.start_fallback(&coin.unwrap()).await
+                        self.done(&coin.unwrap()).await
                     }
                 },
                 else => break,

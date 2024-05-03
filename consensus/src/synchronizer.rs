@@ -49,7 +49,7 @@ impl Future for ElectionFuture {
 pub struct BAState {
     pub epoch: EpochNumber,
     pub consistent: Option<bool>,
-    pub optimistic_sigma1: Option<Block>,
+    pub leader_block: Option<Block>,
     pub coin: Option<RandomCoin>,
     pub wakers: Vec<Waker>,
 }
@@ -69,7 +69,7 @@ impl Future for BAFuture {
                 if let Some(coin) = ba_state.coin.take() {
                     return Poll::Ready((ba_state.epoch, None, Some(coin)));
                 }
-            } else if let Some(b) = ba_state.optimistic_sigma1.take() {
+            } else if let Some(b) = ba_state.leader_block.take() {
                 return Poll::Ready((ba_state.epoch, Some(b), None));
             }
         }
@@ -166,7 +166,7 @@ impl Synchronizer {
         loop {
             tokio::select! {
                 Some((epoch, ba_state, election_state)) = aba_sync_receiver.recv() => {
-                    let vote = ba_state.lock().unwrap().optimistic_sigma1.is_some();
+                    let vote = ba_state.lock().unwrap().leader_block.is_some();
                     aba_channel.send((epoch, vote)).await.expect("Failed to send vote to background aba.");
 
                     waiting.insert(epoch, ba_state.clone());
@@ -190,7 +190,7 @@ impl Synchronizer {
                                 let ba_state = Arc::new(Mutex::new(BAState{
                                     epoch,
                                     consistent: Some(false),
-                                    optimistic_sigma1: None,
+                                    leader_block: None,
                                     coin: None,
                                     wakers: Vec::new()
                                 }));
