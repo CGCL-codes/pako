@@ -7,12 +7,12 @@ use serde::{de, ser, Deserialize, Serialize};
 use std::array::TryFromSliceError;
 use std::convert::{TryFrom, TryInto};
 use std::fmt;
-use tokio::sync::mpsc::{channel, Sender};
-use tokio::sync::oneshot;
+use threshold_crypto::serde_impl::SerdeSecret;
 use threshold_crypto::{
     PublicKeySet, PublicKeyShare, SecretKeySet, SecretKeyShare, SignatureShare,
 };
-use threshold_crypto::serde_impl::SerdeSecret;
+use tokio::sync::mpsc::{channel, Sender};
+use tokio::sync::oneshot;
 
 #[cfg(test)]
 #[path = "tests/crypto_tests.rs"]
@@ -235,8 +235,10 @@ impl SignatureService {
             }
         });
 
-        return Self { channel: tx, tss_sign_channel: tss_tx };
-        
+        return Self {
+            channel: tx,
+            tss_sign_channel: tss_tx,
+        };
     }
 
     pub async fn request_signature(&mut self, digest: Digest) -> Signature {
@@ -254,11 +256,12 @@ impl SignatureService {
         if let Err(e) = self.tss_sign_channel.send((digest, sender)).await {
             panic!("Failed to send message TSS Signature Service: {}", e);
         }
-        return Some(receiver
-            .await
-            .expect("Failed to receive tss signature share from TSS Signature Service"));
+        return Some(
+            receiver
+                .await
+                .expect("Failed to receive tss signature share from TSS Signature Service"),
+        );
     }
-
 }
 
 // Wrapper for threshold signature key shares
@@ -271,8 +274,18 @@ pub struct SecretShare {
 }
 
 impl SecretShare {
-    pub fn new(id: usize, name: PublicKeyShare, secret: SerdeSecret<SecretKeyShare>, pkset: PublicKeySet) -> Self {
-        Self { id, name, secret, pkset }
+    pub fn new(
+        id: usize,
+        name: PublicKeyShare,
+        secret: SerdeSecret<SecretKeyShare>,
+        pkset: PublicKeySet,
+    ) -> Self {
+        Self {
+            id,
+            name,
+            secret,
+            pkset,
+        }
     }
 }
 
@@ -283,6 +296,11 @@ impl Default for SecretShare {
         let pk_set = sk_set.public_keys();
         let sk_share = sk_set.secret_key_share(0);
         let pk_share = pk_set.public_key_share(0);
-        Self{ id: 0, name: pk_share, secret: SerdeSecret(sk_share), pkset: pk_set}
+        Self {
+            id: 0,
+            name: pk_share,
+            secret: SerdeSecret(sk_share),
+            pkset: pk_set,
+        }
     }
 }

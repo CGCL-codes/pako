@@ -1,7 +1,7 @@
-use crate::Committee;
 use crate::aba::BAVote;
 use crate::config::Stake;
 use crate::error::{ConsensusError, ConsensusResult};
+use crate::Committee;
 use crypto::PublicKey;
 use std::collections::HashSet;
 
@@ -38,15 +38,22 @@ impl<T> Aggregator<T> {
     pub fn take(&self, threshold: Stake) -> Option<&Vec<T>> {
         (self.weight == threshold).then(|| &self.votes)
     }
-
 }
 
 impl Aggregator<BAVote> {
     // To decide if there is a threshold of vote.
     pub fn is_verified(&self, committee: &Committee, vote: &bool, threshold: &Stake) -> bool {
-        let stake: Stake = self.votes.iter()
-        .map(|v| if v.vote == *vote { committee.stake(&v.author) } else { 0 })
-        .sum();
+        let stake: Stake = self
+            .votes
+            .iter()
+            .map(|v| {
+                if v.vote == *vote {
+                    committee.stake(&v.author)
+                } else {
+                    0
+                }
+            })
+            .sum();
         stake == *threshold
     }
 }

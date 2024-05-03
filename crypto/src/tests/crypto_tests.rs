@@ -154,9 +154,14 @@ async fn signature_service_tss() {
 
     let (_, sk1) = keys().pop().unwrap();
     let mut service1 = SignatureService::new(sk1, sk_set.secret_key_share(1));
-    let sig_share_1 = service1.request_tss_signature(digest.clone()).await.unwrap();
+    let sig_share_1 = service1
+        .request_tss_signature(digest.clone())
+        .await
+        .unwrap();
 
-    assert!(pk_set.public_key_share(0).verify(&sig_share_0, digest.clone()));
+    assert!(pk_set
+        .public_key_share(0)
+        .verify(&sig_share_0, digest.clone()));
     assert!(pk_set.public_key_share(1).verify(&sig_share_1, digest));
 }
 
@@ -176,7 +181,9 @@ async fn threshold_signature_test() {
     }
 
     // Combine them to produce the main signature.
-    let sig = pk_set.combine_signatures(&sig_shares).expect("not enough shares");
+    let sig = pk_set
+        .combine_signatures(&sig_shares)
+        .expect("not enough shares");
 
     // Validate the main signature. If the shares were valid, this can't fail.
     assert!(pk_set.public_key().verify(&sig, msg));

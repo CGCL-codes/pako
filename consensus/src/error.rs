@@ -1,4 +1,4 @@
-use crate::{messages::Proof, config::{EpochNumber, ViewNumber}};
+use crate::{config::EpochNumber, messages::Sigma};
 use crypto::{CryptoError, Digest, PublicKey};
 use store::StoreError;
 use thiserror::Error;
@@ -41,8 +41,11 @@ pub enum ConsensusError {
     #[error("Consensus message with halted epoch: {0}, currently lowest epoch not halted: {1}")]
     MessageWithHaltedEpoch(EpochNumber, EpochNumber),
 
+    #[error("Invalid commit vector from {0}")]
+    InvalidCommitVector(PublicKey),
+
     #[error("Invalid vote proof")]
-    InvalidVoteProof(Proof),
+    InvalidVoteProof(Sigma),
 
     #[error("Invalid signature")]
     InvalidSignature(#[from] CryptoError),
@@ -83,18 +86,17 @@ pub enum ConsensusError {
     #[error("Malformed block {0}")]
     MalformedBlock(Digest),
 
-    #[error("Echo of block {digest} of leader {leader} received by {author} at epoch {epoch}, view {view}")]
+    #[error("Echo of block {digest} of leader {leader} received by {author} at epoch {epoch}")]
     WrongLeader {
         digest: Digest,
         leader: PublicKey,
         author: PublicKey,
         epoch: EpochNumber,
-        view: ViewNumber,
     },
 
     #[error("Invalid payload")]
     InvalidPayload,
 
     #[error("Invalid optimistic halt")]
-    InvalidOptimisticHalt
+    InvalidOptimisticHalt,
 }

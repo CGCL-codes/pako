@@ -9,8 +9,8 @@ use crypto::{PublicKey, SignatureService};
 use log::info;
 use network::{NetReceiver, NetSender};
 use store::Store;
-use tokio::sync::mpsc::{channel, Receiver, Sender};
 use threshold_crypto::PublicKeySet;
+use tokio::sync::mpsc::{channel, Receiver, Sender};
 
 #[cfg(test)]
 #[path = "tests/consensus_tests.rs"]
@@ -27,7 +27,7 @@ impl Consensus {
         parameters: Parameters,
         store: Store,
         signature_service: SignatureService,
-        pk_set: PublicKeySet,   // The set of tss public keys
+        pk_set: PublicKeySet, // The set of tss public keys
         tx_core: Sender<ConsensusMessage>,
         rx_core: Receiver<ConsensusMessage>,
         tx_ba_core: Sender<BAMessage>,
@@ -54,7 +54,7 @@ impl Consensus {
 
         let (tx_network, rx_network) = channel(10000);
         let (tx_ba_network, rx_ba_network) = channel(10000);
-    
+
         let (tx_mvba_filter, rx_mvba_filter) = channel(10000);
         let (tx_ba_filter, rx_ba_filter) = channel(10000);
 
@@ -82,7 +82,7 @@ impl Consensus {
             x.set_ip("0.0.0.0".parse().unwrap());
             x
         })?;
-        
+
         let ba_network_receiver = NetReceiver::new(ba_address, tx_ba_core.clone());
         tokio::spawn(async move {
             ba_network_receiver.run().await;
@@ -98,19 +98,19 @@ impl Consensus {
 
         // Custom filter to arbitrary delay network messages.
         let mut consensus_filter = Filter::<ConsensusMessage> {
-            from: rx_mvba_filter, 
+            from: rx_mvba_filter,
             to: tx_network,
-            parameters: parameters.clone() 
+            parameters: parameters.clone(),
         };
         tokio::spawn(async move {
             consensus_filter.run().await;
         });
 
         // Init BA message filter.
-        let mut ba_filter = Filter::<BAMessage> { 
-            from: rx_ba_filter, 
+        let mut ba_filter = Filter::<BAMessage> {
+            from: rx_ba_filter,
             to: tx_ba_network,
-            parameters: parameters.clone() 
+            parameters: parameters.clone(),
         };
         tokio::spawn(async move {
             ba_filter.run().await;
@@ -126,8 +126,8 @@ impl Consensus {
             store,
             mempool_driver,
             /* core_channel */ rx_core,
-            /* aba_invoke_channel */tx_ba,
-            /* aba_output_channel */rx_ba_output,
+            /* aba_invoke_channel */ tx_ba,
+            /* aba_output_channel */ rx_ba_output,
             /* network_filter */ tx_mvba_filter,
             /* commit_channel */ tx_commit,
         );
@@ -150,7 +150,7 @@ impl Consensus {
         tokio::spawn(async move {
             aba.run().await;
         });
-    
+
         Ok(())
     }
 }

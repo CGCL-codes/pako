@@ -1,14 +1,14 @@
 use crate::config::Export as _;
 use crate::config::{Committee, Parameters, Secret};
 use consensus::{Block, Consensus, ConsensusError};
-use crypto::{SignatureService, SecretShare};
+use crypto::{SecretShare, SignatureService};
 use log::info;
 use mempool::{Mempool, MempoolError};
 use store::{Store, StoreError};
 use thiserror::Error;
-use tokio::sync::mpsc::{channel, Receiver};
-use threshold_crypto::SecretKeySet;
 use threshold_crypto::serde_impl::SerdeSecret;
+use threshold_crypto::SecretKeySet;
+use tokio::sync::mpsc::{channel, Receiver};
 
 #[derive(Error, Debug)]
 pub enum NodeError {
@@ -111,11 +111,12 @@ impl Node {
         let mut rng = rand::thread_rng();
         let sk_set = SecretKeySet::random(threshold, &mut rng);
         let pk_set = sk_set.public_keys();
-        
+
         for id in 0..size {
             let sk_share = sk_set.secret_key_share(id);
             let pk_share = pk_set.public_key_share(id);
-            SecretShare::new(id, pk_share, SerdeSecret(sk_share.clone()), pk_set.clone()).write(filenames[id])?;
+            SecretShare::new(id, pk_share, SerdeSecret(sk_share.clone()), pk_set.clone())
+                .write(filenames[id])?;
         }
         return Ok(());
     }

@@ -1,9 +1,8 @@
 use bytes::Bytes;
 use futures::sink::SinkExt as _;
-use futures::stream::{StreamExt as _, FuturesUnordered};
+use futures::stream::{FuturesUnordered, StreamExt as _};
 use log::{debug, info, warn};
 use serde::de::DeserializeOwned;
-use tokio::time::sleep;
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::net::SocketAddr;
@@ -11,6 +10,7 @@ use std::time::Duration;
 use thiserror::Error;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc::{channel, Receiver, Sender};
+use tokio::time::sleep;
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
 #[cfg(test)]
@@ -76,7 +76,12 @@ impl NetSender {
             for count in 0..5 {
                 match &stream {
                     Err(e) => {
-                        warn!("Failed to connect to {} in startup: {}, retry {}", address, e, count + 1);
+                        warn!(
+                            "Failed to connect to {} in startup: {}, retry {}",
+                            address,
+                            e,
+                            count + 1
+                        );
                         sleep(Duration::from_millis(*retry)).await;
                         stream = TcpStream::connect(address).await;
                     }

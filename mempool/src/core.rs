@@ -3,7 +3,7 @@ use crate::error::{MempoolError, MempoolResult};
 use crate::messages::Payload;
 use crate::payload::PayloadMaker;
 use crate::synchronizer::Synchronizer;
-use consensus::{Block, ConsensusMempoolMessage, PayloadStatus, EpochNumber};
+use consensus::{Block, ConsensusMempoolMessage, EpochNumber, PayloadStatus};
 use crypto::Hash as _;
 use crypto::{Digest, PublicKey};
 #[cfg(feature = "benchmark")]

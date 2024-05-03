@@ -58,11 +58,7 @@ impl MempoolDriver {
     }
 
     pub async fn cleanup_async(&mut self, block: &Block) {
-        let digests = block
-            .payload
-            .iter()
-            .cloned()
-            .collect();
+        let digests = block.payload.iter().cloned().collect();
         let message = ConsensusMempoolMessage::Cleanup(digests, block.epoch);
         self.mempool_channel
             .send(message)
