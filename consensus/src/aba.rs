@@ -24,8 +24,8 @@ pub enum BAMessage {
     Val(BAVote),
     Aux(BAVote),
     Conf(BAConf),
-    RandomnessShare(RandomnessShare),
-    RandomCoin(RandomCoin),
+    RandomnessShare(ABAShare),
+    RandomCoin(ABACoin),
     Halt(BAVote),
 }
 
@@ -42,8 +42,9 @@ pub enum BAPhase {
 pub struct BAVote {
     pub author: PublicKey,
     pub vote: bool,
-    pub epoch: EpochNumber, // epoch that outer protocol currently in
-    pub view: ViewNumber,   // view that aba instance proceeds into
+    pub epoch: EpochNumber,     // epoch that outer protocol currently in
+    pub outer_view: ViewNumber, // view that outer mvba currently in
+    pub view: ViewNumber,       // view that aba instance proceeds into
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,6 +52,7 @@ pub struct BAConf {
     pub author: PublicKey,
     pub bin_val: HashSet<bool>, // bin_val carried by Conf
     pub epoch: EpochNumber,
+    pub outer_view: ViewNumber,
     pub view: ViewNumber,
 }
 
@@ -75,6 +77,18 @@ impl BAConf {
         );
         Ok(())
     }
+}
+
+#[derive(Clone, Serialize, Deserialize, Debug)]
+pub struct ABAShare {
+    share: RandomnessShare,
+    aba_view: ViewNumber,
+}
+
+#[derive(Clone, Serialize, Deserialize, Debug)]
+pub struct ABACoin {
+    coin: RandomCoin,
+    aba_view: ViewNumber,
 }
 
 impl BAVote {
@@ -114,8 +128,8 @@ pub struct BinaryAgreement {
     coin_share_aggregators:
         HashMap<(EpochNumber, ViewNumber, BAPhase), Aggregator<RandomnessShare>>,
 
-    input_channel: Receiver<(EpochNumber, bool)>, // receive input from optimistic path
-    output_channel: Sender<(EpochNumber, bool)>,  // output aba result to node
+    input_channel: Receiver<(EpochNumber, ViewNumber, bool)>, // receive input from optimistic path
+    output_channel: Sender<(EpochNumber, ViewNumber, bool)>,  // output aba result to node
     core_channel: Receiver<BAMessage>,
 
     halt_mark: EpochNumber,
@@ -130,8 +144,8 @@ impl BinaryAgreement {
         pk_set: PublicKeySet,
         signature_service: SignatureService,
         network_filter: Sender<BAFilterInput>,
-        input_channel: Receiver<(EpochNumber, bool)>,
-        output_channel: Sender<(EpochNumber, bool)>,
+        input_channel: Receiver<(EpochNumber, ViewNumber, bool)>,
+        output_channel: Sender<(EpochNumber, ViewNumber, bool)>,
         core_channel: Receiver<BAMessage>,
     ) -> Self {
         Self {
@@ -191,6 +205,7 @@ impl BinaryAgreement {
             author: self.name,
             vote: val.vote,
             epoch: val.epoch,
+            outer_view: val.outer_view,
             view: val.view,
         };
 
@@ -234,6 +249,7 @@ impl BinaryAgreement {
                 author: self.name,
                 bin_val,
                 epoch: aux.epoch,
+                outer_view: aux.outer_view,
                 view: aux.view,
             };
             self.handle_conf(&conf).await?;
@@ -268,18 +284,21 @@ impl BinaryAgreement {
                     self.signature_service.clone(),
                 )
                 .await;
-                self.handle_randomness_share(&randomness_share).await?;
-                self.transmit(BAMessage::RandomnessShare(randomness_share))
-                    .await
+                let share = ABAShare {
+                    share: randomness_share,
+                    aba_view: conf.view,
+                };
+                self.handle_randomness_share(&share).await?;
+                self.transmit(BAMessage::RandomnessShare(share)).await
             }
         }
     }
 
     async fn handle_randomness_share(
         &mut self,
-        randomness_share: &RandomnessShare,
+        randomness_share: &ABAShare,
     ) -> ConsensusResult<()> {
-        randomness_share.verify(
+        randomness_share.share.verify(
             &self.committee,
             &self.pk_set,
             self.halt_mark,
@@ -289,16 +308,16 @@ impl BinaryAgreement {
         let shares = self
             .coin_share_aggregators
             .entry((
-                randomness_share.epoch,
-                randomness_share.view,
+                randomness_share.share.epoch,
+                randomness_share.share.view,
                 BAPhase::RandomnessShare,
             ))
             .or_insert_with(|| Aggregator::<RandomnessShare>::new());
 
         shares.append(
-            randomness_share.author,
-            randomness_share.clone(),
-            self.committee.stake(&randomness_share.author),
+            randomness_share.share.author,
+            randomness_share.share.clone(),
+            self.committee.stake(&randomness_share.share.author),
         )?;
 
         // n-f randomness shares to reveal coin value.
@@ -326,37 +345,42 @@ impl BinaryAgreement {
                 keys.sort();
                 let leader = keys[id];
                 debug!(
-                    "Random coin of epoch {} view {} choose value {{{}}}",
-                    randomness_share.epoch,
-                    randomness_share.view,
+                    "Random coin of epoch {} view {} aba_view {} choose value {{{}}}",
+                    randomness_share.share.epoch,
+                    randomness_share.share.view,
+                    randomness_share.aba_view,
                     self.committee.id(leader) / 2 == 0
                 );
 
                 let random_coin = RandomCoin {
                     author: self.name,
-                    epoch: randomness_share.epoch,
-                    view: randomness_share.view,
+                    epoch: randomness_share.share.epoch,
+                    view: randomness_share.share.view,
                     leader,
                     threshold_sig: threshold_signature,
                 };
-                self.handle_random_coin(random_coin.clone()).await
+                let coin = ABACoin {
+                    coin: random_coin,
+                    aba_view: randomness_share.aba_view,
+                };
+                self.handle_random_coin(coin).await
             }
         }
     }
 
-    async fn handle_random_coin(&mut self, random_coin: RandomCoin) -> ConsensusResult<()> {
-        random_coin.verify(
+    async fn handle_random_coin(&mut self, random_coin: ABACoin) -> ConsensusResult<()> {
+        random_coin.coin.verify(
             &self.committee,
             &self.pk_set,
             self.halt_mark,
             &self.epochs_halted,
         )?;
 
-        let coin = self.committee.id(random_coin.leader) / 2 == 0;
+        let result = self.committee.id(random_coin.coin.leader) / 2 == 0;
 
         let bin_vals = self
             .conf_aggregators
-            .get(&(random_coin.epoch, random_coin.view, BAPhase::Conf))
+            .get(&(random_coin.coin.epoch, random_coin.coin.view, BAPhase::Conf))
             .unwrap()
             .votes
             .to_owned();
@@ -367,32 +391,28 @@ impl BinaryAgreement {
                 intersect.union(&conf.bin_val).cloned().collect()
             });
 
-        if union.len() == 2 {
-            let next_vote = BAVote {
-                author: self.name,
-                vote: coin,
-                epoch: random_coin.epoch,
-                view: random_coin.view + 1,
-            };
-            self.handle_val(&next_vote).await?;
-            self.transmit(BAMessage::Val(next_vote)).await?;
-        } else {
-            let next_vote = union.iter().any(|vote| *vote);
-            let next_vote = BAVote {
-                author: self.name,
-                vote: next_vote,
-                epoch: random_coin.epoch,
-                view: random_coin.view + 1,
-            };
-            self.handle_val(&next_vote).await?;
-            self.transmit(BAMessage::Val(next_vote.clone())).await?;
+        let mut next_vote = BAVote {
+            author: self.name,
+            vote: result,
+            epoch: random_coin.coin.epoch,
+            outer_view: random_coin.coin.view,
+            view: random_coin.aba_view + 1,
+        };
 
-            if next_vote.vote == coin {
+        if union.len() != 2 {
+            let vote = union.iter().any(|vote| *vote);
+            next_vote = BAVote { vote, ..next_vote };
+
+            if next_vote.vote == result {
                 // Output value to mvba.
-                self.output(random_coin.epoch, coin).await;
-                self.transmit(BAMessage::Halt(next_vote)).await?;
+                self.output(random_coin.coin.epoch, random_coin.coin.view, result)
+                    .await;
+                self.transmit(BAMessage::Halt(next_vote.clone())).await?;
             }
         }
+
+        self.handle_val(&next_vote).await?;
+        self.transmit(BAMessage::Val(next_vote)).await?;
 
         Ok(())
     }
@@ -412,19 +432,19 @@ impl BinaryAgreement {
             self.committee.stake(&halt.author),
         )?;
         if aggregator.weight == self.committee.random_coin_threshold() {
-            self.output(halt.epoch, halt.vote).await;
+            self.output(halt.epoch, halt.outer_view, halt.vote).await;
         }
 
         Ok(())
     }
 
-    async fn output(&mut self, epoch: EpochNumber, vote: bool) {
+    async fn output(&mut self, epoch: EpochNumber, view: ViewNumber, vote: bool) {
         debug!(
             "Successfully output from Binary Agreement in epoch {}, with vote {{ {} }}",
             epoch, vote
         );
         self.output_channel
-            .send((epoch, vote))
+            .send((epoch, view, vote))
             .await
             .expect("Failed to send ABA result back through output channel.");
 
@@ -447,10 +467,10 @@ impl BinaryAgreement {
     pub async fn run(&mut self) {
         loop {
             let result = tokio::select! {
-                Some((epoch, vote)) = self.input_channel.recv() => {
+                Some((epoch, outer_view, vote)) = self.input_channel.recv() => {
                     self.halt_mark = epoch - 1;
 
-                    let val = BAVote { author: self.name, vote, epoch, view: 1 };
+                    let val = BAVote { author: self.name, vote, epoch, outer_view, view: 1 };
                     if let Err(e) = self.handle_val(&val).await {
                         Err(e)
                     } else {

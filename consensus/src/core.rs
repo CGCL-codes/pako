@@ -4,14 +4,12 @@ use crate::error::{ConsensusError, ConsensusResult};
 use crate::filter::ConsensusFilterInput;
 use crate::mempool::MempoolDriver;
 use crate::messages::*;
-use crate::synchronizer::{transmit, BAState, ElectionFuture, ElectionState, Synchronizer};
+use crate::synchronizer::{transmit, BAState, ElectionState, Synchronizer};
 use crypto::Hash as _;
 use crypto::{Digest, PublicKey, SignatureService};
 use ed25519_dalek::Digest as _;
 use ed25519_dalek::Sha512;
-use futures::lock::MutexGuard;
 use log::{debug, error, info, warn};
-use std::borrow::Borrow;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use store::Store;
@@ -30,15 +28,20 @@ pub struct Core {
     network_filter: Sender<ConsensusFilterInput>,
 
     core_channel: Receiver<ConsensusMessage>,
-    aba_sync_sender: Sender<(EpochNumber, Arc<Mutex<BAState>>, Arc<Mutex<ElectionState>>)>, // invoke aba, wait for done
-    aba_sync_feedback_receiver: Receiver<(EpochNumber, bool, Option<RandomCoin>)>,
+    aba_sync_sender: Sender<(
+        EpochNumber,
+        ViewNumber,
+        Arc<Mutex<BAState>>,
+        Arc<Mutex<ElectionState>>,
+    )>, // invoke aba, wait for done
+    aba_sync_feedback_receiver: Receiver<(EpochNumber, ViewNumber, bool)>,
     halt_channel: Sender<(Arc<Mutex<ElectionState>>, Block)>, // handle halts
     advance_channel: Receiver<Halt>,                          // propose block for next epoch
     commit_channel: Sender<Block>,
 
     votes_aggregators: HashMap<(EpochNumber, Digest), Aggregator<ConsensusMessage>>, // n-f votes collector
     election_states: HashMap<(EpochNumber, ViewNumber), Arc<Mutex<ElectionState>>>, // stores states of leader election
-    ba_states: HashMap<EpochNumber, Arc<Mutex<BAState>>>, // store states of ABA, indicating whether ABA result is arrived
+    ba_states: HashMap<(EpochNumber, ViewNumber), Arc<Mutex<BAState>>>, // store states of ABA, indicating whether ABA result is arrived
     blocks_received: HashMap<(PublicKey, EpochNumber), Block>, // blocks received from others and the node itself, will be updated as consensus proceeds
     commit_vectors_received: HashMap<(PublicKey, EpochNumber), CommitVector>, // commit-vectors received within each epoch
 
@@ -57,8 +60,8 @@ impl Core {
         store: Store,
         mempool_driver: MempoolDriver,
         core_channel: Receiver<ConsensusMessage>,
-        aba_channel: Sender<(EpochNumber, bool)>,
-        aba_feedback_channel: Receiver<(EpochNumber, bool)>,
+        aba_channel: Sender<(EpochNumber, ViewNumber, bool)>,
+        aba_feedback_channel: Receiver<(EpochNumber, ViewNumber, bool)>,
         network_filter: Sender<ConsensusFilterInput>,
         commit_channel: Sender<Block>,
     ) -> Self {
@@ -123,11 +126,7 @@ impl Core {
 
     async fn store(&mut self, block: &Block) {
         // Store block with key <epoch, view, author>.
-        let digest = digest!(
-            block.epoch.to_le_bytes(),
-            block.view.to_le_bytes(),
-            block.author.0
-        );
+        let digest = digest!(block.epoch.to_le_bytes(), block.author.0);
         let key = digest.to_vec();
         let value = bincode::serialize(block).expect("Failed to serialize block");
         self.store.write(key, value).await;
@@ -155,12 +154,7 @@ impl Core {
     }
 
     // Generate a new block.
-    async fn generate_block(
-        &mut self,
-        epoch: EpochNumber,
-        view: ViewNumber,
-        proof: Sigma,
-    ) -> ConsensusResult<Block> {
+    async fn generate_block(&mut self, epoch: EpochNumber, proof: Sigma) -> ConsensusResult<Block> {
         // Get payloads.
         let payload = self
             .mempool_driver
@@ -171,7 +165,6 @@ impl Core {
             payload,
             self.name,
             epoch,
-            view,
             proof,
             self.signature_service.clone(),
         )
@@ -574,10 +567,15 @@ impl Core {
         }
     }
 
-    async fn invoke_ba(&mut self, epoch: EpochNumber, ba_state: Arc<Mutex<BAState>>) {
+    async fn invoke_ba(
+        &mut self,
+        epoch: EpochNumber,
+        view: ViewNumber,
+        ba_state: Arc<Mutex<BAState>>,
+    ) {
         let election_state = self
             .election_states
-            .entry((epoch, 1))
+            .entry((epoch, view))
             .or_insert(Arc::new(Mutex::new(ElectionState {
                 coin: None,
                 wakers: Vec::new(),
@@ -586,7 +584,7 @@ impl Core {
 
         // Send vote to ABA.
         self.aba_sync_sender
-            .send((epoch, ba_state, election_state))
+            .send((epoch, view, ba_state, election_state))
             .await
             .expect(&format!("Failed to invoke aba at epoch {}", epoch));
     }
@@ -645,8 +643,7 @@ impl Core {
 
         let done = Done {
             author: self.name,
-            epoch: random_coin.epoch,
-            view: random_coin.view,
+            coin: random_coin.clone(),
             proof,
         };
         self.handle_done(&done).await?;
@@ -656,12 +653,13 @@ impl Core {
     async fn handle_done(&mut self, done: &Done) -> ConsensusResult<()> {
         done.verify(
             &self.committee,
+            &self.pk_set,
             self.halt_mark,
             &self.epochs_halted,
         )?;
 
         self.votes_aggregators
-            .entry((done.epoch, done.digest()))
+            .entry((done.coin.epoch, done.digest()))
             .or_insert_with(|| Aggregator::<ConsensusMessage>::new())
             .append(
                 done.author,
@@ -671,7 +669,7 @@ impl Core {
 
         let dones = self
             .votes_aggregators
-            .get_mut(&(done.epoch, done.digest()))
+            .get_mut(&(done.coin.epoch, done.digest()))
             .unwrap()
             .take(self.committee.quorum_threshold());
 
@@ -691,205 +689,74 @@ impl Core {
                     });
 
                 // Invoke ABA.
-                let coin = self.election_states
-                    .get(&(done.epoch, done.view))
-                    .unwrap()
-                    .lock()
-                    .unwrap()
-                    .coin
-                    .clone()
-                    .unwrap();
-                
-                let leader_block = self.get_block(coin.leader, done.epoch).cloned();
-                debug!("Invoke binary agreement of epoch {}, vote: {}", done.epoch, optimistic_sigma1.is_some());
-                let ba_state = Arc::new(Mutex::new(
-                    BAState {
-                        consistent: None,
-                        coin: Some(random_coin.clone()),
-                        leader_block,
-                        wakers: Vec::new(),
-                        epoch: randomness_share.epoch
-                    }
-                ));
-                self.ba_states.insert(randomness_share.epoch, ba_state.clone());
-                self.invoke_ba(randomness_share.epoch, ba_state).await
-            }
-        }
-    }
-
-    async fn handle_vote(&mut self, vote: &Vote) -> ConsensusResult<()> {
-        vote.verify(
-            &self.committee,
-            &self.pk_set,
-            self.halt_mark,
-            &self.epochs_halted,
-        )?;
-
-        self.votes_aggregators
-            .entry((vote.epoch, vote.digest()))
-            .or_insert_with(|| Aggregator::<ConsensusMessage>::new())
-            .append(
-                vote.author,
-                ConsensusMessage::Vote(vote.clone()),
-                self.committee.stake(&vote.author),
-            )?;
-
-        let votes = self
-            .votes_aggregators
-            .get_mut(&(vote.epoch, vote.digest()))
-            .unwrap()
-            .take(self.committee.quorum_threshold());
-
-        match votes {
-            // Votes not enough.
-            None => Ok(()),
-
-            Some(votes) => {
-                let votes: Vec<_> = votes
-                    .into_iter()
-                    .filter_map(|vote| match vote {
-                        ConsensusMessage::Vote(vote) => Some(vote),
+                let leader_block = self.get_block(done.coin.leader, done.coin.epoch).and_then(
+                    |block| match &block.proof {
+                        Some(_) => Some(block.clone()),
                         _ => None,
-                    })
-                    .collect();
-
-                // n-f `Yes` votes.
-                if votes
-                    .iter()
-                    .all(|vote| matches!(vote.body, VoteEnum::Yes(_, _)))
-                {
-                    let shares: BTreeMap<_, _> = votes
-                        .iter()
-                        .filter_map(|vote| match &vote.body {
-                            VoteEnum::Yes(_, share) => {
-                                Some((self.committee.id(vote.author), share))
-                            }
-                            _ => None,
-                        })
-                        .collect();
-                    let sigma2 = self
-                        .pk_set
-                        .combine_signatures(shares)
-                        .expect("not enough qualified shares");
-
-                    // Add sigma2 and halt.
-                    if let VoteEnum::Yes(block, _) = &vote.body {
-                        if let Proof::Sigma(sigma1, _) = &block.proof {
-                            let mut completed_block = block.clone();
-                            completed_block.proof = Proof::Sigma(sigma1.clone(), Some(sigma2));
-                            self.handle_halt(Halt {
-                                block: completed_block,
-                                is_optimistic: false,
-                            })
-                            .await?;
-                        }
-                    }
-                }
-                // n-f `No` votes.
-                else if votes
-                    .iter()
-                    .all(|vote| matches!(vote.body, VoteEnum::No(_, _)))
-                {
-                    let shares: BTreeMap<_, _> = votes
-                        .iter()
-                        .filter_map(|vote| match &vote.body {
-                            VoteEnum::No(_, share) => Some((self.committee.id(vote.author), share)),
-                            _ => None,
-                        })
-                        .collect();
-                    let quorum_for_null = self
-                        .pk_set
-                        .combine_signatures(shares)
-                        .expect("not enough qualified shares");
-
-                    // Broadcast the same block in new round, except updated pi and view.
-                    let pi = (false, vote.view, quorum_for_null);
-                    let mut block = self
-                        .get_block(self.name, vote.epoch, vote.view)
-                        .unwrap()
-                        .clone();
-
-                    // Update block and start SPB of next view.
-                    block.proof = Proof::Pi(vec![pi]);
-                    block.view += 1;
-                    block.signature = self
-                        .signature_service
-                        .request_signature(block.digest())
-                        .await;
-                    self.spb(block).await?;
-                }
-                // Mixed `Yes` and `No` votes.
-                else {
-                    let sigma1 = votes
-                        .iter()
-                        .find_map(|vote| match &vote.body {
-                            VoteEnum::Yes(block, _) => match &block.proof {
-                                Proof::Sigma(sigma1, _) => Some(sigma1),
-                                _ => None,
-                            },
-                            _ => None,
-                        })
-                        .unwrap();
-
-                    // Broadcast the leader's block in next round.
-                    let pi = (true, vote.view, sigma1.as_ref().unwrap().clone());
-                    let mut block = self
-                        .get_block(self.name, vote.epoch, vote.view)
-                        .unwrap()
-                        .clone();
-
-                    block.proof = Proof::Pi(vec![pi]);
-                    block.view += 1;
-                    block.signature = self
-                        .signature_service
-                        .request_signature(block.digest())
-                        .await;
-                    self.spb(block).await?;
-                }
+                    },
+                );
+                debug!(
+                    "Invoke binary agreement of epoch {}, vote: {}",
+                    done.coin.epoch,
+                    leader_block.is_some()
+                );
+                let ba_state = Arc::new(Mutex::new(BAState {
+                    consistent: None,
+                    coin: Some(done.coin.clone()),
+                    leader_block,
+                    wakers: Vec::new(),
+                    epoch: done.coin.epoch,
+                    view: done.coin.view,
+                }));
+                self.ba_states
+                    .insert((done.coin.epoch, done.coin.view), ba_state.clone());
+                self.invoke_ba(done.coin.epoch, done.coin.view, ba_state)
+                    .await;
 
                 Ok(())
             }
         }
     }
 
-    async fn handle_request_help(
-        &self,
-        epoch: EpochNumber,
-        requester: PublicKey,
-    ) -> ConsensusResult<()> {
-        if let Some(block) = self.get_block(self.get_optimistic_leader(epoch), epoch, 1) {
-            if let Proof::Sigma(_, _) = block.proof {
-                self.transmit(ConsensusMessage::Help(block.clone()), Some(&requester))
-                    .await?;
-            }
-        }
-        Ok(())
-    }
+    // async fn handle_request_help(
+    //     &self,
+    //     epoch: EpochNumber,
+    //     leader: PublicKey,
+    //     requester: PublicKey,
+    // ) -> ConsensusResult<()> {
+    //     if let Some(block) = self.get_block(leader, epoch) {
+    //         if let Some(_) = &block.proof {
+    //             self.transmit(ConsensusMessage::Help(block.clone()), Some(&requester))
+    //                 .await?;
+    //         }
+    //     }
+    //     Ok(())
+    // }
 
-    async fn handle_help(&mut self, optimistic_sigma1: Block) -> ConsensusResult<()> {
-        // Verify optimistic sigma1 from others to help commit from optimistic path.
-        optimistic_sigma1.verify(&self.committee, self.halt_mark, &self.epochs_halted)?;
-        ensure!(
-            optimistic_sigma1.check_sigma1(&self.pk_set.public_key()),
-            ConsensusError::InvalidSignatureShare(optimistic_sigma1.author)
-        );
+    // async fn handle_help(&mut self, leader_block: Block) -> ConsensusResult<()> {
+    //     // Verify optimistic sigma1 from others to help commit from optimistic path.
+    //     leader_block.verify(&self.committee, self.halt_mark, &self.epochs_halted)?;
+    //     ensure!(
+    //         leader_block.check_sigma(&self.pk_set.public_key()),
+    //         ConsensusError::InvalidSignatureShare(leader_block.author)
+    //     );
 
-        // Modify ba_state to wake up BAFuture in aba sync task.
-        let mut ba_state = self
-            .ba_states
-            .get_mut(&optimistic_sigma1.epoch)
-            .unwrap()
-            .lock()
-            .unwrap();
-        if ba_state.leader_block.is_none() {
-            ba_state.leader_block = Some(optimistic_sigma1);
-            while let Some(waker) = ba_state.wakers.pop() {
-                waker.wake();
-            }
-        }
+    //     // Modify ba_state to wake up BAFuture in aba sync task.
+    //     let mut ba_state = self
+    //         .ba_states
+    //         .get_mut(&(leader_block.epoch, leader_block))
+    //         .unwrap()
+    //         .lock()
+    //         .unwrap();
+    //     if ba_state.leader_block.is_none() {
+    //         ba_state.leader_block = Some(leader_block);
+    //         while let Some(waker) = ba_state.wakers.pop() {
+    //             waker.wake();
+    //         }
+    //     }
 
-        Ok(())
-    }
+    //     Ok(())
+    // }
 
     async fn handle_halt(&mut self, halt: Halt) -> ConsensusResult<()> {
         halt.verify(
@@ -960,14 +827,8 @@ impl Core {
     }
 
     async fn start_new_epoch(&mut self, epoch: EpochNumber) -> ConsensusResult<()> {
-        debug!(
-            "Start new epoch {} with optimistic leader {}",
-            epoch,
-            self.get_optimistic_leader(epoch)
-        );
-
         let new_block = self
-            .generate_block(epoch, 1, Proof::Pi(Vec::new()))
+            .generate_block(epoch, None)
             .await
             .expect(&format!("Failed to generate block of epoch {}", epoch));
         self.spb(new_block).await
@@ -980,8 +841,7 @@ impl Core {
             self.halt_mark += 1;
         }
 
-        self.blocks_received
-            .retain(|&(_, e, _), _| e != block.epoch);
+        self.blocks_received.retain(|&(_, e), _| e != block.epoch);
         self.votes_aggregators.retain(|&(e, _), _| e != block.epoch);
         self.election_states.retain(|&(e, _), _| e != block.epoch);
 
@@ -1008,20 +868,19 @@ impl Core {
                         ConsensusMessage::RandomnessShare(randomness_share) => self.handle_randommess_share(&randomness_share).await,
                         ConsensusMessage::RandomCoin(random_coin) => self.handle_random_coin(&random_coin).await,
                         ConsensusMessage::Done(prevote) => self.handle_done(&prevote).await,
-                        ConsensusMessage::RequestHelp(epoch, requester) => self.handle_request_help(epoch, requester).await,
-                        ConsensusMessage::Help(optimistic_sigma1) => self.handle_help(optimistic_sigma1).await,
+                        // ConsensusMessage::RequestHelp(epoch, leader, requester) => self.handle_request_help(epoch, leader, requester).await,
+                        // ConsensusMessage::Help(optimistic_sigma1) => self.handle_help(optimistic_sigma1).await,
                     }
                 },
                 Some(halt) = self.advance_channel.recv() => {
                     self.advance(halt).await
                 },
-                Some((epoch, is_optimistic_path_success, coin)) = self.aba_sync_feedback_receiver.recv() => {
-                    if is_optimistic_path_success {
-                        // Request help for commiting from optimistic path.
-                        self.transmit(ConsensusMessage::RequestHelp(epoch, self.name), None).await
-                    } else {
-                        self.done(&coin.unwrap()).await
+                Some((epoch, view, success)) = self.aba_sync_feedback_receiver.recv() => {
+                    if !success {
+                        let randomness_share = RandomnessShare::new(epoch, view, self.name, self.signature_service.clone()).await;
+                        self.transmit(ConsensusMessage::RandomnessShare(randomness_share), None).await;
                     }
+                    Ok(())
                 },
                 else => break,
             };

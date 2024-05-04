@@ -49,8 +49,8 @@ pub enum ConsensusMessage {
     RandomnessShare(RandomnessShare),
     RandomCoin(RandomCoin),
     Done(Done),
-    RequestHelp(EpochNumber, PublicKey),
-    Help(Block),
+    // RequestHelp(EpochNumber, PublicKey, PublicKey),
+    // Help(Block),
 }
 
 impl fmt::Display for ConsensusMessage {
@@ -66,8 +66,8 @@ impl fmt::Display for ConsensusMessage {
                 ConsensusMessage::RandomnessShare(_) => "RANDOMNESS_SHARE",
                 ConsensusMessage::RandomCoin(_) => "RANDOM_COIN",
                 ConsensusMessage::Done(_) => "PREVOTE",
-                ConsensusMessage::RequestHelp(_, _) => "REQUEST_HELP",
-                ConsensusMessage::Help(_) => "HELP",
+                // ConsensusMessage::RequestHelp(_, _, _) => "REQUEST_HELP",
+                // ConsensusMessage::Help(_) => "HELP",
             }
         )
     }
@@ -85,7 +85,6 @@ pub struct Block {
     pub author: PublicKey,
     pub signature: Signature,
     pub epoch: EpochNumber,
-    pub view: ViewNumber,
     pub proof: Sigma,
 }
 
@@ -94,7 +93,6 @@ impl Block {
         payload: Vec<Digest>,
         author: PublicKey,
         epoch: EpochNumber,
-        view: ViewNumber,
         proof: Sigma,
         mut signature_service: SignatureService,
     ) -> Self {
@@ -103,7 +101,6 @@ impl Block {
             author,
             signature: Signature::default(),
             epoch,
-            view,
             proof,
         };
         let signature = signature_service.request_signature(block.digest()).await;
@@ -148,7 +145,6 @@ impl Hash for Block {
         let mut hasher = Sha512::new();
         hasher.update(self.author.0);
         hasher.update(self.epoch.to_le_bytes());
-        hasher.update(self.view.to_le_bytes());
         self.payload.iter().for_each(|p| hasher.update(p));
         hasher.update(match &self.proof {
             Some(_) => &[1],
@@ -162,11 +158,10 @@ impl fmt::Debug for Block {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
         write!(
             f,
-            "{}: Block(author {}, epoch {}, view {}, has_qc {}, payload_len {})",
+            "{}: Block(author {}, epoch {}, has_qc {}, payload_len {})",
             self.digest(),
             self.author,
             self.epoch,
-            self.view,
             match self.proof {
                 Some(_) => "Yes",
                 _ => "No",
@@ -571,9 +566,7 @@ impl Hash for RandomCoin {
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Done {
     pub author: PublicKey,
-    pub leader: PublicKey,
-    pub epoch: EpochNumber,
-    pub view: ViewNumber,
+    pub coin: RandomCoin,
     pub proof: Sigma,
 }
 
@@ -581,22 +574,19 @@ impl Done {
     pub fn verify(
         &self,
         committee: &Committee,
+        pk_set: &PublicKeySet,
         halt_mark: EpochNumber,
         epochs_halted: &HashSet<EpochNumber>,
     ) -> ConsensusResult<()> {
-        // Check for epoch.
-        ensure!(
-            self.epoch > halt_mark && !epochs_halted.contains(&self.epoch),
-            ConsensusError::MessageWithHaltedEpoch(self.epoch, halt_mark + 1)
-        );
-
         // Ensure the authority has voting rights.
         ensure!(
             committee.stake(&self.author) > 0,
             ConsensusError::UnknownAuthority(self.author)
         );
 
-        Ok(())
+        // Check validity of random coin.
+        self.coin
+            .verify(committee, pk_set, halt_mark, epochs_halted)
     }
 
     pub fn check_sigma(&self, pk: &threshold_crypto::PublicKey) -> bool {
@@ -609,7 +599,11 @@ impl Done {
 
 impl Hash for Done {
     fn digest(&self) -> Digest {
-        digest!(self.epoch.to_le_bytes(), self.view.to_le_bytes(), "DONE")
+        digest!(
+            self.coin.epoch.to_le_bytes(),
+            self.coin.view.to_le_bytes(),
+            "DONE"
+        )
     }
 }
 
@@ -619,8 +613,8 @@ impl fmt::Debug for Done {
             f,
             "PreVote(author {}, epoch {}, view {}, vote {})",
             self.author,
-            self.epoch,
-            self.view,
+            self.coin.epoch,
+            self.coin.view,
             match &self.proof {
                 Some(_) => "Yes",
                 None => "No",
