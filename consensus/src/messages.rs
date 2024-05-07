@@ -6,7 +6,7 @@ use ed25519_dalek::Sha512;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::convert::TryInto;
-use std::{fmt, hash};
+use std::fmt;
 use threshold_crypto::{PublicKeySet, SignatureShare};
 
 #[macro_export]
@@ -626,7 +626,7 @@ impl fmt::Debug for Done {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Halt {
     pub block: Block,
-    pub is_optimistic: bool,
+    pub author: PublicKey,
 }
 
 impl Halt {
@@ -637,30 +637,29 @@ impl Halt {
         halt_mark: EpochNumber,
         epochs_halted: &HashSet<EpochNumber>,
     ) -> ConsensusResult<()> {
-        // If halt from optimistic path, check leader.
-        if self.is_optimistic {
-            let leader = committee
-                .get_public_key(self.block.epoch as usize % committee.size())
-                .unwrap();
-
-            ensure!(
-                leader == self.block.author,
-                ConsensusError::InvalidOptimisticHalt
-            )
-        }
-
+        // Ensure the authority has voting rights.
+        ensure!(
+            committee.stake(&self.author) > 0,
+            ConsensusError::UnknownAuthority(self.author)
+        );
+        
         // Verify block.
         self.block.verify(committee, halt_mark, epochs_halted)?;
         ensure!(
-            self.block.check_sigma(&pk_set.public_key())
-                && if !self.is_optimistic {
-                    self.block.check_sigma(&pk_set.public_key())
-                } else {
-                    true
-                },
+            self.block.check_sigma(&pk_set.public_key()),
             ConsensusError::InvalidSignatureShare(self.block.author)
         );
-
         Ok(())
+    }
+}
+
+impl Hash for Halt {
+    fn digest(&self) -> Digest {
+        // Echo is distinguished by <epoch, phase>,
+        digest!(
+            self.block.epoch.to_le_bytes(),
+            self.block.author.0,
+            "HALT"
+        )
     }
 }

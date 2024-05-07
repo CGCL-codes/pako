@@ -2,7 +2,7 @@ use crate::config::Committee;
 use crate::core::MempoolMessage;
 use crate::error::{MempoolError, MempoolResult};
 use bytes::Bytes;
-use consensus::{Block, ConsensusMessage, EpochNumber};
+use consensus::{Block, ConsensusMessage, EpochNumber, Val};
 use crypto::Hash as _;
 use crypto::{Digest, PublicKey};
 use futures::future::try_join_all;
@@ -112,7 +112,7 @@ impl Synchronizer {
                                 for x in &block.payload {
                                     let _ = requests.remove(x);
                                 }
-                                let message = ConsensusMessage::Val(block);
+                                let message = ConsensusMessage::Val(Val::Block(block));
                                 if let Err(e) = consensus_channel.send(message).await {
                                     panic!("Failed to send message to consensus: {}", e);
                                 }

@@ -21,4 +21,4 @@ pub use crate::config::{Committee, EpochNumber, Parameters, ViewNumber};
 pub use crate::consensus::Consensus;
 pub use crate::error::ConsensusError;
 pub use crate::mempool::{ConsensusMempoolMessage, PayloadStatus};
-pub use crate::messages::{Block, ConsensusMessage, Sigma};
+pub use crate::messages::{Val, Block, ConsensusMessage, Sigma};

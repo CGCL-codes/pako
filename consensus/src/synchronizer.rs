@@ -1,13 +1,13 @@
 use crate::{
     error::ConsensusResult,
-    messages::{Halt, RandomCoin},
+    messages::RandomCoin,
     Block, Committee, EpochNumber, ViewNumber,
 };
 use crypto::PublicKey;
 use futures::{stream::FuturesUnordered, Future, StreamExt};
 use log::debug;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     fmt::Debug,
     net::SocketAddr,
     pin::Pin,
@@ -103,50 +103,6 @@ pub async fn transmit<T: Debug>(
 pub struct Synchronizer;
 
 impl Synchronizer {
-    pub async fn run_sync_halt(
-        mut rx_halt: Receiver<(Arc<Mutex<ElectionState>>, Block)>,
-        tx_advance: Sender<Halt>,
-    ) {
-        // Handle Halt till receives the leader.
-        let mut halt_mark = 0;
-        let mut epochs_halted = HashSet::new();
-        let mut halts_unhandled = HashMap::<EpochNumber, Vec<Block>>::new();
-        let mut waiting =
-            FuturesUnordered::<Pin<Box<dyn Future<Output = RandomCoin> + Send>>>::new();
-        loop {
-            tokio::select! {
-                Some((election_state, block)) = rx_halt.recv() => {
-                    halts_unhandled.entry(block.epoch)
-                        .or_insert_with(|| {
-                            waiting.push(Box::pin(ElectionFuture{election_state}));
-                            Vec::new()
-                        })
-                        .push(block);
-                },
-                Some(coin) = waiting.next() => {
-                    let blocks = halts_unhandled.remove(&coin.epoch).unwrap();
-                    let verified = blocks.into_iter()
-                        .find(|b| b.author == coin.leader && !epochs_halted.contains(&coin.epoch) && coin.epoch > halt_mark);
-                    if let Some(verified) = verified {
-                        // Broadcast Halt and propose block of next epoch.
-                        if let Err(e) = tx_advance.send(
-                            Halt {block: verified.clone(), is_optimistic: false}
-                        ).await {
-                            panic!("Failed to send message through advance channel: {}", e);
-                        }
-                        // Clean up halted.
-                        epochs_halted.insert(coin.epoch);
-                        if epochs_halted.remove(&(halt_mark + 1)) {
-                            halt_mark += 1;
-                        }
-
-                    }
-                },
-                else => break,
-            }
-        }
-    }
-
     pub async fn run_sync_aba(
         aba_channel: Sender<(EpochNumber, ViewNumber, bool)>, // channel to invoke aba consensus
         mut aba_feedback_channel: Receiver<(EpochNumber, ViewNumber, bool)>, // read aba consensus result
@@ -157,7 +113,7 @@ impl Synchronizer {
             Arc<Mutex<ElectionState>>,
         )>, // send sync result back to main protocol
         abs_sync_feedback_sender: Sender<(EpochNumber, ViewNumber, bool)>, // notify main consensus to enter fallback path
-        tx_advance: Sender<Halt>, // notify main consensus to commit block of optimistic path
+        tx_advance: Sender<Block>, // notify main consensus to commit block of optimistic path
     ) {
         let mut waiting = HashMap::new();
         let mut waiting_fallback_leader =
@@ -212,12 +168,12 @@ impl Synchronizer {
                 Some((epoch, view, leader_block, coin)) = ending.next() => {
                     abs_sync_feedback_sender
                         .send((epoch, view, leader_block.is_some())).await
-                        .expect("Failed to send epoch through fallback channel.");
+                        .expect("Failed to send epoch through aba feedback channel.");
 
                     if let Some(block) = leader_block {
                         tx_advance
-                            .send(Halt{block, is_optimistic: true}).await
-                            .expect("Failed to send optimistic block through advance channel.");
+                            .send(block).await
+                            .expect("Failed to send block through advance channel.");
                     }
                 },
                 Some(coin) = waiting_fallback_leader.next() => {
