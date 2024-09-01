@@ -9,6 +9,7 @@ use serde::Serialize;
 use std::net::SocketAddr;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::time::{sleep, Duration};
+use rand::distributions::{Distribution, Uniform};
 
 pub type ConsensusFilterInput = (ConsensusMessage, Vec<SocketAddr>);
 pub type BAFilterInput = (BAMessage, Vec<SocketAddr>);
@@ -37,6 +38,14 @@ impl Filter<ConsensusMessage> {
             // NOTE: Increase the delay here (you can use any value from the 'parameters').
             if parameters.ddos {
                 sleep(Duration::from_millis(parameters.network_delay)).await;
+            }
+
+            // If parameters.max_random_delay is set, this will add a 
+            // uniformly distributed delay in [0, parameters.max_random_delay].
+            if parameters.max_random_delay > 0 {
+                let between = Uniform::from(0..parameters.max_random_delay);
+                let mut rng = rand::thread_rng();
+                let _ = sleep(Duration::from_millis(between.sample(&mut rng)));
             }
         }
         input
