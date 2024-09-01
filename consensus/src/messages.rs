@@ -53,6 +53,7 @@ impl fmt::Display for PBPhase {
 pub enum ConsensusMessage {
     Val(Block),
     Echo(Echo),
+    TimeOut(EpochNumber),
     Finish(Finish),
     Amplify(Amplify),
     Halt(Halt),
@@ -71,6 +72,7 @@ impl fmt::Display for ConsensusMessage {
             match &self {
                 ConsensusMessage::Val(_) => "VAL",
                 ConsensusMessage::Echo(_) => "ECHO",
+                ConsensusMessage::TimeOut(_) => "TIMEOUT",
                 ConsensusMessage::Finish(_) => "FINISH",
                 ConsensusMessage::Halt(_) => "HALT",
                 ConsensusMessage::RandomnessShare(_) => "RANDOMNESS_SHARE",

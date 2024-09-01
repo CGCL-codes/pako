@@ -419,6 +419,13 @@ impl Core {
 
     }
 
+    async fn handle_timout(&mut self, epoch: EpochNumber) -> ConsensusResult<()> {
+        let optimistic_sigma1 = self.get_block(self.get_optimistic_leader(epoch), epoch, 1).cloned();
+        let amplify = Amplify { author: self.name, epoch, optimistic_sigma1 };
+        let _ = self.handle_amplify(&amplify).await;
+        self.transmit(ConsensusMessage::Amplify(amplify), None).await
+    }
+
     async fn finish(&mut self, block: &Block) -> ConsensusResult<()> {
         // Update proof of the block of the node's own.
         self.update_block(block.clone());
@@ -936,6 +943,7 @@ impl Core {
                     match msg {
                         ConsensusMessage::Val(block) => self.handle_val(block).await,
                         ConsensusMessage::Echo(echo) => self.handle_echo(&echo).await,
+                        ConsensusMessage::TimeOut(epoch) => self.handle_timout(epoch).await,
                         ConsensusMessage::Amplify(amplify) => self.handle_amplify(&amplify).await,
                         ConsensusMessage::Finish(finish) => self.handle_finish(&finish).await,
                         ConsensusMessage::Halt(halt) => self.handle_halt(halt).await,
@@ -951,10 +959,7 @@ impl Core {
                     self.advance(halt).await
                 },
                 Some(epoch) = self.timeout_result_channel.recv() => {
-                    let optimistic_sigma1 = self.get_block(self.get_optimistic_leader(epoch), epoch, 1).cloned();
-                    let amplify = Amplify { author: self.name, epoch, optimistic_sigma1 };
-                    let _ = self.handle_amplify(&amplify).await;
-                    self.transmit(ConsensusMessage::Amplify(amplify), None).await
+                    self.transmit(ConsensusMessage::TimeOut(epoch), Some(&self.name)).await
                 },
                 Some((epoch, is_optimistic_path_success)) = self.aba_sync_feedback_receiver.recv() => {
                     if is_optimistic_path_success {
